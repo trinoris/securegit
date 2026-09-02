@@ -9,6 +9,7 @@ export interface MergeOptions {
     /** Repository-relative path — %P. Used for key derivation and diagnostics only. */
     path: string;
     bindPath?: boolean;
+    padTo?: number;
     /** Conflict marker length — %L. Git's own default is 7. */
     markerSize?: number;
     base: Buffer;

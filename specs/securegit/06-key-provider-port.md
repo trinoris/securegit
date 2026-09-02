@@ -7,7 +7,12 @@ has and the cloud does not. That something differs per user and per machine —
 passphrase today, a TPM on the desktop, a smartcard for the person who travels.
 This is the interface that keeps that choice out of the crypto core.
 
-**Status: NOT IMPLEMENTED.** `passphrase-file` is the only v1 implementation.
+**Status: IMPLEMENTED — the port and one provider.** `src/provider.ts` (the
+`KeyProvider` interface) and `PassphraseFileProvider` are both built and
+tested. `passphrase-file` remains the only v1 implementation; hardware
+providers (`tpm2`, `piv`, `os-keychain`) sit behind this same port,
+unimplemented, by design — see [00](00-test-plan.md)'s "Deliberately not
+phased" note.
 
 ## Core Principle
 
@@ -77,7 +82,7 @@ existing code.
 | `os-keychain` | no | designed | DPAPI / macOS Keychain / libsecret. Better UX; no keychain under WSL, so it always needs a fallback. |
 | `tpm2` | no | designed | Seals the RMK to PCRs. Machine-bound: a re-imaged laptop loses it, so it is never the only path. |
 | `piv` | no | designed | YubiKey / smartcard. Portable, hardware-bound, matches the threat model best. |
-| `recovery-code` | no | **v1** | Not interactive; used by `import-recovery` ([09](09-rotation-recovery.md)). |
+| `recovery-code` | no | built, but not a `KeyProvider` | Not interactive; used by `import-recovery` ([09](09-rotation-recovery.md)). As built, this is *not* a `KeyProvider` implementation behind this port — `src/recovery.ts` derives its wrap key directly from the code via HKDF and does its own AES-256-GCM wrap/unwrap, bypassing `provider.ts` entirely. The RMKs it recovers are then handed to an ordinary `PassphraseFileProvider` (via `keyringFromRecoveredGenerations`) to become the new local keyring's actual provider. The reason: this port's `init`/`wrap`/`unwrap` shape is built around one *persistent* secret per generation (a passphrase, a TPM binding); a recovery code instead needs to decrypt *every* generation at once under one code, which doesn't fit that per-generation shape without distortion. |
 | `kms` | **yes** | designed | Deliberate escrow only. See below. |
 
 ## `custodial` is the field that matters
@@ -195,7 +200,7 @@ always have at least one non-custodial way back in.
 | `available()` never prompts | `src/provider.conformance.test.ts` | — | ✅ |
 | Passphrase under 12 characters is refused at `init` | `src/provider.test.ts` | — | ✅ |
 | Removing the last non-custodial provider is refused | `src/keyring.test.ts` | — | 🔲 |
-| A custodial-only repository is a `verify` finding | `src/verify.test.ts` | — | 🔲 |
+| A custodial-only repository is a `verify` finding | `src/verify.test.ts` | — | ✅ |
 | Provider never receives a path or file content | `src/provider.conformance.test.ts` | — | 🔲 |
 
 ## Relationship to Other Specs

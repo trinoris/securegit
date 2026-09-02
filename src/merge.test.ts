@@ -66,6 +66,20 @@ describe('merge()', () => {
     expect(decrypt(result.output)).toBe(MERGED_NONCONFLICT);
   });
 
+  it('pads the re-encrypted result when padTo is given', async () => {
+    const result = await merge({
+      keys: unlocked(),
+      path: PATH,
+      base: env(BASE),
+      ours: env(OURS_NONCONFLICT),
+      theirs: env(THEIRS_NONCONFLICT),
+      padTo: 64,
+    });
+
+    expect(parseEnvelope(result.output).padded).toBe(true);
+    expect(decrypt(result.output)).toBe(MERGED_NONCONFLICT);
+  });
+
   it('writes ciphertext to the result, never plaintext', async () => {
     const result = await merge({
       keys: unlocked(),

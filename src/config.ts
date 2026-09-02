@@ -23,6 +23,8 @@ export interface RepoConfig {
   version: 1;
   repoId: string;
   bindPath: boolean;
+  /** Pad protected content to a multiple of this many bytes. 0 disables padding. See 14-metadata-leakage.md. */
+  padTo: number;
 }
 
 export function configPath(repoDir: string): string {
@@ -51,6 +53,7 @@ async function isGitRepo(repoDir: string): Promise<boolean> {
 
 export interface InitConfigOptions {
   bindPath?: boolean;
+  padTo?: number;
 }
 
 export async function initConfig(
@@ -61,6 +64,11 @@ export async function initConfig(
     throw new ConfigError(
       `securegit: ${repoDir} is not a Git repository (no .git found)`,
     );
+  }
+
+  const padTo = opts.padTo ?? 0;
+  if (!Number.isInteger(padTo) || padTo < 0) {
+    throw new ConfigError(`securegit: padTo must be a non-negative integer, got ${padTo}`);
   }
 
   const path = configPath(repoDir);
@@ -78,6 +86,7 @@ export async function initConfig(
     version: 1,
     repoId: generateRepoId(),
     bindPath: opts.bindPath ?? false,
+    padTo,
   };
 
   await mkdir(join(repoDir, '.securegit'), { recursive: true });

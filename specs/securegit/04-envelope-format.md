@@ -6,7 +6,10 @@ The on-disk representation of an encrypted blob: what `clean` writes, what
 `smudge` reads, and the rules that keep a repository written by version 1
 readable by version 9.
 
-**Status: NOT IMPLEMENTED.**
+**Status: IMPLEMENTED.** `src/envelope.ts` — `seal`/`unseal`/`parseEnvelope`/
+`looksLikeEnvelope` — matches this document exactly; format-breaking
+deviations found while building it were corrected here, not there (there is
+no declared-length field, for one — see the edge-case table below).
 
 ## Core Principle
 
@@ -23,12 +26,12 @@ Binary, fixed header, no length-prefixed sections to get wrong.
 | 0 | 11 | `magic` | `\0SECUREGIT\0` |
 | 11 | 1 | `format` | `0x01` |
 | 12 | 1 | `algorithm` | see table below |
-| 13 | 1 | `flags` | bit 0 = `bindPath`; bits 1–7 reserved, must be 0 |
+| 13 | 1 | `flags` | bit 0 = `bindPath`; bit 1 = `padded` ([14](14-metadata-leakage.md), see below); bits 2–7 reserved, must be 0 |
 | 14 | 1 | `keyIdLen` | `n`, 1–64 |
 | 15 | n | `keyId` | ASCII, `<generation>.<fingerprint>` |
 | 15+n | 32 | `tag` | content tag ([03](03-determinism.md)) |
 | 47+n | 16 | `authTag` | AES-GCM authentication tag |
-| 63+n | — | `ciphertext` | same length as the plaintext |
+| 63+n | — | `ciphertext` | same length as the plaintext, or the padded content when `padded` is set |
 
 Overhead is `63 + n` bytes — 81 for a typical 18-character `keyId`.
 
@@ -41,6 +44,33 @@ Overhead is `63 + n` bytes — 81 for a typical 18-character `keyId`.
 `0x00 ‖ path` when `bindPath` is set. Every field that changes the meaning of
 the ciphertext is therefore authenticated: an adversary cannot flip `flags`,
 renumber the generation, or downgrade `algorithm` without the tag check failing.
+
+### Padding (bit 1 of `flags`)
+
+When `padded` is set, the *plaintext of the ciphertext* — what `aeadEncrypt`
+actually sees, before this header's own AAD — is not the caller's original
+content directly, but:
+
+```
+[4-byte BE length][original content][zero padding to the next multiple of padTo]
+```
+
+`unseal` reads the 4-byte length first and returns exactly that many bytes
+after it, discarding the rest — never "trim trailing zero bytes," which
+would silently corrupt content that legitimately ends in NUL bytes of its
+own. `padTo` itself is **not** part of the envelope; it lives in
+`.securegit/config.json` ([14](14-metadata-leakage.md)) and is needed only
+to *produce* a padded envelope, never to read one back — the length prefix
+already says everything `unseal` needs, which is what makes the format
+self-describing regardless of what `padTo` a repository is configured with
+now, or was configured with when a given blob was sealed.
+
+The content tag, the file key, and the AEAD encryption itself all operate on
+the padded buffer as a whole, not the original content — padding is applied
+before every other step in `seal`, unwound after every other step in
+`unseal`. This costs nothing for determinism ([03](03-determinism.md)):
+padding a given plaintext to a given `padTo` is itself a pure function, so
+the composition (pad, then seal) is exactly as deterministic as `seal` alone.
 
 ### Why binary rather than the JSON envelope in the sketch
 
@@ -169,6 +199,8 @@ did not already have.
 | Oversized input errors before allocating | `src/envelope.test.ts` | — | ✅ |
 | `bindPath` envelope fails to decrypt under a different path | `src/envelope.test.ts` | — | ✅ |
 | `inspect` works with no key present | `src/envelope.test.ts` | `envelopes/` | ✅ |
+| `padded` envelope round-trips exactly, flag set on seal, cleared on parse of an unpadded one | `src/envelope.test.ts` | — | ✅ |
+| Padding rounds to a multiple of `padTo`; a file above it rounds to the next multiple | `src/envelope.test.ts` | — | ✅ |
 
 ## Relationship to Other Specs
 

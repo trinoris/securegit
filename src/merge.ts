@@ -33,6 +33,7 @@ export interface MergeOptions {
   /** Repository-relative path — %P. Used for key derivation and diagnostics only. */
   path: string;
   bindPath?: boolean;
+  padTo?: number;
   /** Conflict marker length — %L. Git's own default is 7. */
   markerSize?: number;
   base: Buffer;
@@ -141,6 +142,7 @@ export async function merge(opts: MergeOptions): Promise<MergeResult> {
       keyId: current.keyId,
       path: opts.path,
       bindPath,
+      ...(opts.padTo !== undefined ? { padTo: opts.padTo } : {}),
     });
     return { clean, output };
   } finally {

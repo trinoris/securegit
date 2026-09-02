@@ -6,7 +6,17 @@ Getting the repository master key onto a second workstation, or into a
 colleague's hands, without a server that holds plaintext keys and without
 sending a secret over a channel either of you would rather not trust.
 
-**Status: NOT IMPLEMENTED.**
+**Status: MOSTLY IMPLEMENTED.** `src/identity.ts`, `src/recipients.ts`, and
+the join-flow CLI (`identity init`/`show`, `key add-recipient`/
+`remove-recipient`, and `unlock`'s recipient-file bootstrap path) are all
+built and tested, including two end-to-end proofs that a second identity can
+join and decrypt with zero shared secrets ever leaving the repository — one
+CLI-level (two identities against one shared working directory) and one
+against a real clone/push/pull in `src/git.integration.test.ts`, which also
+surfaced a genuine ordering constraint (F21 below). Not built yet: `key
+rotate`/`reencrypt` (so `remove-recipient`'s warning is accurate but nothing
+enforces it yet), and `key list-recipients`/`verify --access`. See "What
+this pass actually built" below.
 
 ## Core Principle
 
@@ -108,15 +118,17 @@ new laptop" is `git clone` followed by one command, with no infrastructure.
 ```
   new machine                          existing machine
   ───────────                          ────────────────
+  git clone …
   securegit identity init
   securegit identity show   ──pubkey──▶
                                         securegit key add-recipient \
                                             SGPUB1… --label laptop
                                         git commit .securegit/recipients
                                         git push
-  git pull
+  git pull                        ← must come before `install`; see below
+  securegit install
   securegit unlock              ← finds its own fingerprint, unwraps every
-  git rm --cached -r -q .         generation, writes a local keyring
+  git rm --cached -r -q .         generation it was given, writes a session
   git checkout HEAD -- .
 ```
 
@@ -126,10 +138,27 @@ worktree content already matches the index, `--force` or not, so `smudge`
 never reruns on an already-checked-out ciphertext file. `git rm --cached`
 first, then a real re-checkout from `HEAD`, is what actually works.
 
+**`install` has to come after that `git pull`, not before it — confirmed
+against a real clone in `src/git.integration.test.ts`.** `git pull`, even a
+plain fast-forward with no conflicts, runs `clean` as a safety check on
+tracked files to confirm the worktree hasn't been locally modified before
+touching anything — on *every* tracked path it's about to leave alone, not
+just the ones in the incoming diff. If the filter is already attached and
+the new machine is (as it always is, at this point) locked, that `clean`
+call fails closed exactly as designed ([07](07-unlock-session.md)) and
+aborts the whole pull — including the recipient file the new machine needs
+in order to ever stop being locked. There is no ordering of `install` and
+`unlock` alone that avoids this; the fix is that the very first `git pull`
+on a brand-new clone has to happen before `install` ever attaches the
+filter at all, exactly like a keyless clone that never runs `install`
+([15](15-failure-modes.md), F4).
+
 `unlock` on a machine with no keyring looks for `.securegit/recipients/<own
-fingerprint>.json`, unwraps each generation with the identity key, and writes a
-local keyring wrapped by that machine's own provider. From then on the identity
-key is only needed when a new generation is added.
+fingerprint>.json`, unwraps each generation it was given with the identity
+key, and writes a session — not a persisted local keyring; see "What this
+pass actually built" below for why a session is what's actually built.
+From then on the identity key is only needed when a new generation is
+added and the session has expired.
 
 ### Leaving
 
@@ -171,22 +200,192 @@ Mitigations, in the order they are worth doing:
 fingerprints and the commit that added each, so "who can read this repository"
 is answerable from the history rather than from memory.
 
+## What this pass actually built
+
+`src/identity.ts` exports `generateX25519KeyPair()`, `encodePublicKey`/
+`decodePublicKey`, `identityFingerprint`, `createIdentity`/`unlockIdentity`,
+and `identityPath`/`writeIdentityFile`/`readIdentityFile`.
+
+- **Raw 32-byte keys via JWK export, not DER parsing.** Node's
+  `generateKeyPairSync('x25519')` returns `KeyObject`s; the cleanest way to
+  get the raw key bytes this spec's encoding needs is `.export({format:
+  'jwk'})`, which for an OKP key gives `{x: base64url pubkey, d: base64url
+  privkey}` directly — no manual ASN.1/DER stripping. `x25519SharedSecret`
+  (also in `identity.ts`) reconstructs a `KeyObject` the same way in
+  reverse — `createPublicKey`/`createPrivateKey` with `{format: 'jwk', key:
+  {kty: 'OKP', crv: 'X25519', x, d}}` — and is the one function
+  `recipients.ts` actually calls for the `X25519(ephPriv, recipientPub)` step
+  below; `identity.test.ts`'s real ECDH round-trip proved the primitive
+  before `recipients.ts` ever depended on it.
+- **The encoding checksum and the fingerprint are different hashes,
+  deliberately.** The spec doesn't give the checksum an exact formula
+  ("4-byte checksum"); this pass chose plain `SHA-256(pubkey)[0:4]` —
+  un-namespaced, unlike the fingerprint's `SHA-256("securegit/identity/v1" ‖
+  pubkey)[0:8]`. Collapsing them to the same hash would mean a corrupted
+  key's checksum could coincidentally read back as *some* valid-looking
+  fingerprint; keeping them in separate domains rules that out, and it's
+  cheap to assert directly (`identity.test.ts` checks the encoded string
+  never contains the fingerprint).
+- **`IdentityFile.wrapped` carries `state` explicitly, not just `payload`.**
+  The spec's JSON example shows only `{"provider": ..., "payload": {...}}`,
+  eliding the provider's own state (e.g. `PassphraseFileProvider`'s scrypt
+  salt and cost parameters) that `unwrap` needs. `keyring.ts`'s
+  `WrappedKeySlot` already persists `state` alongside `payload` for the same
+  reason; `IdentityFile.wrapped` follows the same shape.
+- **Identity wrapping reuses the `KeyProvider` port with a fixed sentinel
+  context** — `{repoId: 'identity', generation: 0}` — rather than a
+  parallel, identity-specific wrapping interface. An identity isn't scoped
+  to any one repository or generation the way an RMK is, but the port's own
+  `init()` doc comment already anticipated this ("called once when a
+  repository *or identity* is created"), and reusing it means
+  `PassphraseFileProvider` — and any future hardware provider behind
+  [06](06-key-provider-port.md) — protects an identity's private key with
+  exactly the machinery that already protects a repository's master key,
+  with no new code path to audit.
+- **`decodePublicKey`'s checksum check is a plain `Buffer#equals()`, not
+  `equalCt`.** The checksum is derived from the public key alone — already
+  public, sent in the clear — so a timing side-channel on this comparison
+  reveals nothing an attacker couldn't already compute directly from the
+  encoded string. `src/package.test.ts` (T11/T16) allowlists this the same
+  way it already allowlists `envelope.ts`'s `looksLikeEnvelope` magic-byte
+  check.
+
+`src/recipients.ts` exports `wrapForRecipient`/`unwrapForRecipient` (the
+per-generation construction in "Wrapping" above, exactly as specified —
+fresh ephemeral keypair, zero nonce, the AAD binding), `wrapAllGenerations`
+(the `add-recipient` primitive), `unlockFromRecipientFile` (the `unlock`
+bootstrap primitive), and the recipient file's own path/read/write
+functions.
+
+- **`WrappedGeneration` carries `fingerprint` explicitly, unlike the spec's
+  illustrated `{"ephemeral": …, "payload": …}`.** The AAD binds
+  `repoId ‖ generation ‖ fingerprint`, and the *unwrapper* needs the expected
+  fingerprint to reconstruct that AAD before they've recovered the key it
+  would otherwise come from — a chicken-and-egg problem the spec's elided
+  example doesn't surface. Same class of correction as
+  `IdentityFile.wrapped.state` above: the illustrative JSON was incomplete,
+  not wrong in spirit.
+- **The payload is `ciphertext ‖ authTag` as one hex string, not a
+  `{nonce, ciphertext, authTag}` object like `PassphraseFileProvider`'s.**
+  The nonce needs no field at all — it's always the fixed 12 zero bytes the
+  spec specifies, safe only because a fresh ephemeral keypair means
+  `wrapKey` is used for exactly one message. Splitting the payload back into
+  ciphertext and tag on unwrap is a fixed-offset slice
+  (`crypto.ts`'s `TAG_LEN`), not parsing.
+- **`wrapAllGenerations` takes `keyIds` as a separate argument from `keys:
+  KeySource`, rather than calling `keys.available()` internally.** In
+  practice a caller always passes `keys.available()` for both — the split
+  exists so a caller can wrap a *subset* of generations later (a plausible
+  future need this pass didn't want to foreclose) without an API change, and
+  so the function has no way to silently wrap more than the caller asked
+  for. An unparseable or unheld `keyId` is skipped, not an error — see the
+  doc comment for why that's not actually reachable in the common case.
+- **Recipient files get no `0600` restriction, unlike the keyring or an
+  identity file.** They hold nothing secret — an ephemeral public key and a
+  ciphertext only the intended recipient can open — and the spec is explicit
+  that they're meant to be committed and tracked, so ordinary
+  umask-governed permissions are correct, not an oversight.
+
+`src/cli.ts` now wires all of the above into `identity init`/`show`, `key
+add-recipient`/`remove-recipient`, and a second path inside `unlock`.
+
+- **`unlock` bootstraps a *session*, not a persisted local keyring.** The
+  join flow in this spec's own diagram ends with "writes a local keyring" —
+  what's actually built writes a session (`writeSession`, the same tail
+  `unlock`'s ordinary path already uses) and stops there. Persisting a real
+  `keyring.json` from a bootstrap means wrapping every recovered generation
+  for a brand-new local provider, and `keyring.ts` has no primitive for
+  that shape yet — `createKeyring` only ever creates a fresh generation 1,
+  `rotateKeyring` only ever adds one new generation on top of an existing
+  file. Neither fits "wrap N already-known generations for a provider that
+  has never wrapped any of them before." A session is enough for day-to-day
+  use; re-running `unlock` once a session expires is a small, honest cost
+  until that primitive exists — likely as a natural side effect of building
+  `key add-provider` ([09](09-rotation-recovery.md) territory), which needs
+  the same shape.
+- **`identity init`'s `--label` has no default.** The spec's example labels
+  (`laptop`, `desktop`, `ci-build`) are purely descriptive text a human
+  chose; inventing one (hostname, a UUID) would be more likely to mislead
+  than help, so an unlabelled identity just has an empty label.
+- **`key add-recipient`'s `addedBy` is best-effort, not required.** It's
+  populated from the caller's own `~/.securegit/identity.json` fingerprint
+  when one exists, and left blank otherwise — the person adding a recipient
+  may only have ordinary passphrase-based keyring access themselves, having
+  never run `identity init`. Leaving it blank is honest; refusing to add a
+  recipient without an identity of your own would not be.
+- **`key remove-recipient` now records the removal, not just the file
+  deletion.** Deleting the recipient file leaves no trace that the
+  fingerprint ever had access at all — a gap `verify --access`'s "removed
+  recipients" section ([13](13-verify.md)) needs closed. Before unlinking,
+  it reads the file and appends `{fingerprint, label, removedAt, removedBy,
+  generations}` — the generations that file covered, captured before it's
+  gone — to a committed `.securegit/removed-recipients.json`, mirroring
+  `recovery.ts`'s recovery log in shape. Never the still-wrapped keys, which
+  cease to exist once the file itself is deleted.
+- **`key remove-recipient` does not yet refuse removing the last
+  recipient.** The spec's warning about that case assumes recipients can be
+  the *only* access path to a repository — true once hardware-only,
+  recipient-only setups exist, but v1's primary access path is always the
+  local passphrase-wrapped keyring; a recipient is supplementary sharing on
+  top of it, not a replacement for it. Revisit this once that assumption
+  changes.
+- **Two end-to-end proofs, not one.** `src/cli.test.ts` drives two `CliIO`
+  instances — two different `home`s (so two different identities, keyrings
+  and sessions) — against one shared `dir`, which faithfully models "the
+  same repository, two machines" for everything `identity`/`key
+  add-recipient`/`unlock` touch, without the cost of a real clone.
+  `src/git.integration.test.ts` then proves the same flow against an actual
+  bare remote, `git clone`, `git push` and `git pull` — and finding a real
+  bug is exactly why both exist: the CLI-level test alone would never have
+  caught F21 below, because it never drives a real `git pull` at all.
+- **F21, found while building the real-clone proof: a locked repository can
+  fail to `git pull` at all, once the filter is attached.** `git pull` can
+  run `clean` as a pre-merge safety check on tracked paths — including ones
+  the incoming change never touches — to confirm the worktree hasn't been
+  locally modified, and `clean` fails closed when locked
+  ([07](07-unlock-session.md)). Whether it actually does is Git's own call —
+  a stat-cache short-circuit can skip a path it doesn't believe changed, the
+  same mechanism as F16 ([15](15-failure-modes.md)) — but a *fresh clone*
+  reliably lands in the racy window where Git can't trust the cache and must
+  re-check, which is exactly the case this join flow cares about. For a
+  brand-new recipient this is a genuine chicken-and-egg problem: their first
+  `git pull` is what delivers the recipient file that would let them unlock,
+  but if `install` has already attached the filter, that same pull aborts
+  locked before the file ever
+  arrives. The fix is ordering, not code: the join flow
+  ("Flows" above) now runs a brand-new machine's first `git pull` *before*
+  `install`, identical in shape to why a keyless clone that never runs
+  `install` still works at all ([15](15-failure-modes.md), F4). See
+  [02](02-git-integration.md) for the general statement of the mechanism —
+  this is not specific to multi-recipient joining, it would bite anyone who
+  attaches the filter before their first pull for any reason.
+
 ## Test Cases
 
 | Test | Test File | Fixture | Status |
 |------|-----------|---------|--------|
-| Wrap/unwrap round-trips for a recipient | `src/recipients.test.ts` | `identities/` | 🔲 |
-| A different identity cannot unwrap | `src/recipients.test.ts` | `identities/` | 🔲 |
-| Wrapping bound to `repoId` fails elsewhere | `src/recipients.test.ts` | — | 🔲 |
-| Wrapping bound to `generation` fails on another generation | `src/recipients.test.ts` | — | 🔲 |
-| Two wraps for one recipient use different ephemeral keys | `src/recipients.test.ts` | — | 🔲 |
-| Public key encoding round-trips | `src/identity.test.ts` | — | 🔲 |
-| A one-character corruption fails the checksum | `src/identity.test.ts` | — | 🔲 |
-| Fingerprint is derived from the public key, not the file | `src/identity.test.ts` | — | 🔲 |
-| `add-recipient` wraps every existing generation | `src/recipients.test.ts` | — | 🔲 |
-| `unlock` bootstraps a keyring from a recipient file alone | `src/git.integration.test.ts` | `repo-protected/` | 🔲 |
-| End-to-end join on a second identity, then decrypt | `src/git.integration.test.ts` | `identities/` | 🔲 |
-| `remove-recipient` deletes the file and warns about history | `src/recipients.test.ts` | — | 🔲 |
+| Wrap/unwrap round-trips for a recipient | `src/recipients.test.ts` | `identities/` | ✅ |
+| A different identity cannot unwrap | `src/recipients.test.ts` | `identities/` | ✅ |
+| Wrapping bound to `repoId` fails elsewhere | `src/recipients.test.ts` | — | ✅ |
+| Wrapping bound to `generation` fails on another generation | `src/recipients.test.ts` | — | ✅ |
+| Wrapping bound to `fingerprint` fails if the fingerprint is wrong | `src/recipients.test.ts` | — | ✅ |
+| Two wraps for one recipient use different ephemeral keys | `src/recipients.test.ts` | — | ✅ |
+| `unlockFromRecipientFile` recovers every generation it holds; `current()` is the highest | `src/recipients.test.ts` | — | ✅ |
+| `unlockFromRecipientFile` with the wrong identity unlocks nothing, without throwing | `src/recipients.test.ts` | — | ✅ |
+| Recipient file round-trips through disk with ordinary (non-`0600`) permissions | `src/recipients.test.ts` | — | ✅ |
+| Public key encoding round-trips | `src/identity.test.ts` | — | ✅ |
+| A one-character corruption fails the checksum | `src/identity.test.ts` | — | ✅ |
+| Fingerprint is derived from the public key, not the file | `src/identity.test.ts` | — | ✅ |
+| Identity private key round-trips through a real `KeyProvider` | `src/identity.test.ts` | — | ✅ |
+| Identity file round-trips through disk, mode `0600` | `src/identity.test.ts` | — | ✅ |
+| `add-recipient` wraps every existing generation | `src/recipients.test.ts` | — | ✅ |
+| `unlock` bootstraps a session from a recipient file alone (CLI-level) | `src/cli.test.ts` | — | ✅ |
+| `unlock` bootstraps across a real clone (real `git`, not just two `home`s) | `src/git.integration.test.ts` | `repo-protected/` | ✅ |
+| End-to-end join on a second identity, then decrypt (CLI-level) | `src/cli.test.ts` | — | ✅ |
+| End-to-end join across a real clone | `src/git.integration.test.ts` | `identities/` | ✅ |
+| F21: a locked repository with the filter attached cannot `git pull` | `src/git.integration.test.ts` | — | ✅ |
+| `remove-recipient` deletes the file and warns about history | `src/cli.test.ts` | — | ✅ |
+| `remove-recipient` records the removal in the committed removed-recipients log | `src/cli.test.ts`, `src/recipients.test.ts` | — | ✅ |
 | Removed recipient can still read pre-rotation blobs | `src/git.integration.test.ts` | `identities/` | 🔲 |
 | Removed recipient cannot read post-rotation blobs | `src/git.integration.test.ts` | `identities/` | 🔲 |
 | Recipient files are never filtered | `src/install.test.ts` | — | 🔲 |

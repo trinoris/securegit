@@ -4,7 +4,10 @@
 
 Every key in the system, where it comes from, and what it is allowed to touch.
 
-**Status: NOT IMPLEMENTED.**
+**Status: IMPLEMENTED.** The master key, per-file derivation and generations
+are all in `src/crypto.ts` and `src/keyring.ts`. `bindPath` works; hardware
+providers behind [06](06-key-provider-port.md) do not exist yet — this
+document describes them, `passphrase-file` is what ships.
 
 ## Core Principle
 

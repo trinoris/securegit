@@ -6,7 +6,10 @@ How `securegit` attaches to Git: which extension point, which attributes, and
 which of Git's own conversions have to be switched off for the scheme to be
 correct rather than merely usually-correct.
 
-**Status: NOT IMPLEMENTED.**
+**Status: IMPLEMENTED.** `src/filter.ts` (`clean`/`smudge`/`textconv`) and
+`src/install.ts` (`install`/`protect`, writing the real `.git/config` and
+`.gitattributes` entries described below) are both built and tested against
+a real `git` binary.
 
 ## Core Principle
 
@@ -48,6 +51,30 @@ empty input and input that is already ciphertext ([04](04-envelope-format.md)
 defines the passthrough rules). `textconv` is display-only and never writes to
 the object database.
 
+**`clean` runs on more than the obvious triggers, but not unconditionally.**
+Confirmed against a real clone in `src/git.integration.test.ts`: `git pull`
+*can* run `clean` as a pre-merge safety check on a tracked path the incoming
+change never touches — not only the ones in the diff — to confirm the
+worktree hasn't been locally modified before touching anything. Whether it
+actually does is Git's own call: the same stat-cache/tree-diff short-circuit
+behind F16 ([15](15-failure-modes.md), "the same optimization, seen from
+`add` instead of `checkout`") can skip a path Git doesn't believe changed,
+in which case the filter never runs for it at all. Combined with the
+fail-closed asymmetry ([07](07-unlock-session.md)), this means **a locked
+repository is not reliably able to `git pull` once the filter is attached
+and Git decides the safety check is needed** — which, in practice, a fresh
+checkout followed immediately by a pull may not trigger, and a repository
+that's had time to settle usually will (`src/git.integration.test.ts`'s own
+F21 test needed a forced stat-cache miss, F16's own technique, to exercise
+this reliably — see [15](15-failure-modes.md)'s "F21 is the same
+optimization again"). Nothing about this is a plaintext-exposure risk in
+either direction: skipping the check just means Git didn't bother
+re-verifying a file that genuinely didn't change; running it fails closed
+exactly as designed. This is exactly why the join flow in
+[08](08-multi-recipient.md) has a new machine's very first `git pull`
+happen *before* `securegit install`, not after — identical in shape to why a
+keyless clone that never runs `install` still works ([15](15-failure-modes.md), F4).
+
 ## Configuration
 
 Written by `securegit install` into `.git/config` — **local, never committed**,
@@ -85,9 +112,9 @@ different content. The `--` separator is not decoration; paths beginning with
 
 ```gitattributes
 # Protected paths
-.env                    filter=securegit diff=securegit -text
-*.secret                filter=securegit diff=securegit -text
-config/production.*     filter=securegit diff=securegit -text
+.env                    filter=securegit diff=securegit merge=securegit -text
+*.secret                filter=securegit diff=securegit merge=securegit -text
+config/production.*     filter=securegit diff=securegit merge=securegit -text
 
 # securegit's own metadata is public and must never be filtered
 .securegit/**           -filter -diff -text
@@ -181,6 +208,7 @@ rather than mysterious.
 | Round-trip survives `core.autocrlf=true` | `src/git.integration.test.ts` | `repo-protected/` | 🔲 |
 | Round-trip survives an inherited `* text` attribute | `src/git.integration.test.ts` | `attributes/` | 🔲 |
 | `.securegit/**` exclusion is present and last | `src/install.test.ts` | — | ✅ |
+| `clean` runs during `git pull` as a pre-merge safety check, and fails closed when locked (F21) | `src/git.integration.test.ts` | — | ✅ |
 | Filter never opens the path given by `%f` | `src/filter.test.ts` | — | ✅ |
 | A path beginning with `-` is filtered correctly | `src/filter.test.ts` | — | ✅ |
 | `install` writes `cachetextconv = false` | `src/install.test.ts` | — | ✅ |

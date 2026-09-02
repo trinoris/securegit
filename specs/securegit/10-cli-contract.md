@@ -6,10 +6,29 @@ The public surface. Commands, exit codes, and the output discipline that keeps a
 tool which is sometimes a Git filter and sometimes a human interface from
 confusing the two.
 
-**Status: MOSTLY IMPLEMENTED.** `src/cli.ts` covers every command below except
-`unprotect`, `reencrypt`, `filter-process`, and everything under Keys/Recipients
-(those need spec 08/09, not yet built). `verify` and `merge` are wired but only
-in their base form — `verify --history`/`--access`/`--json` are not implemented.
+**Status: MOSTLY IMPLEMENTED.** `src/cli.ts` covers every command below
+except `unprotect` and `key add-provider`/`remove-provider`/`list`/
+`list-recipients`. `verify` now covers its base form, `--history`, and
+`--access` — only `--json` remains unbuilt. `identity
+init`/`show` and `key add-recipient`/`remove-recipient` — the
+multi-recipient join flow — are implemented, including `unlock` bootstrapping
+a session from a recipient file alone when no local keyring exists. `key
+rotate` and `reencrypt` are implemented too ([09](09-rotation-recovery.md)) —
+`key rotate` refuses a dirty tree or a locked repository (locked checked
+first, since the dirty-tree check itself needs to run `clean`, which fails
+closed when locked) and rewraps every existing recipient; `reencrypt` stages
+re-encrypted blobs via plumbing, never touching the worktree file. `key
+export-recovery`/`import-recovery` are implemented on top of `src/recovery.ts`
+and a new `keyringFromRecoveredGenerations` in `src/keyring.ts` — export reads
+straight from the unlocked session (no separate secret needed); import is the
+one command that needs two secrets in one invocation (the recovery code and a
+fresh local passphrase), each with its own env var and, on the stdin
+fallback, its own line. `filter-process` ([11](11-filter-process.md)) is
+implemented too, on `src/pktline.ts`/`src/process.ts` — it doesn't fit
+`CliIO`'s single-shot, whole-buffer contract (a long-running stream can't be
+one `stdin` buffer and one `runCli()` return), so it gets its own entrypoint,
+`runFilterProcess`, called directly from `bin/securegit.ts` before either
+`readStdin()` or `runCli()` runs.
 
 ## Core Principle
 
@@ -24,13 +43,13 @@ in their base form — `verify --history`/`--access`/`--json` are not implemente
 
 | Command | Effect |
 |---|---|
-| `securegit init [--bind-path]` | Create `.securegit/config.json`, generate `repoId`, generation 1. Refuses outside a repository, or if already initialised. |
-| `securegit install [--process] [--no-required] [--bin <cmd>]` | Write `.git/config` filter and diff entries ([02](02-git-integration.md)). Idempotent. `--bin` overrides the command Git invokes (default: the resolved `securegit` on `PATH`) — for a global install where `securegit` is not literally the right invocation on every machine (e.g. `node /path/to/securegit.js`, or a version-pinned wrapper), and for the integration test suite, which cannot assume `securegit` is on `PATH` for a binary that was just built. Not meant to be reached for by a normal user. |
-| `securegit protect <pattern>…` | Add patterns to `.gitattributes` with `filter`, `diff` and `-text`, keeping the `.securegit/**` exclusion last. |
+| `securegit init [--bind-path] [--pad-to <n>]` | Create `.securegit/config.json`, generate `repoId`, generation 1. Refuses outside a repository, or if already initialised. `--pad-to` ([14](14-metadata-leakage.md)) sets `padTo`, a non-negative integer, `0` (disabled) by default; refused if negative or non-numeric. Like `--bind-path`, immutable after `init` — there is no update command for either. |
+| `securegit install [--process] [--no-required] [--bin <cmd>]` | Write `.git/config` filter, diff and merge driver entries ([02](02-git-integration.md), [12](12-diff-merge.md)). Idempotent. `--bin` overrides the command Git invokes (default: the resolved `securegit` on `PATH`) — for a global install where `securegit` is not literally the right invocation on every machine (e.g. `node /path/to/securegit.js`, or a version-pinned wrapper), and for the integration test suite, which cannot assume `securegit` is on `PATH` for a binary that was just built. Not meant to be reached for by a normal user. |
+| `securegit protect <pattern>…` | Add patterns to `.gitattributes` with `filter`, `diff`, `merge` and `-text`, keeping the `.securegit/**` exclusion last. |
 | `securegit unprotect <pattern>…` | Remove patterns. Warns that already-committed blobs stay encrypted until re-committed. |
 | `securegit status` | The diagnostic report in [07](07-unlock-session.md). |
-| `securegit verify [--history]` | The audit in [13](13-verify.md). Implemented: the base form (config + index checks, leak/advice scan). Not yet: `--history`, `--access`, `--json`. |
-| `securegit reencrypt [--paths <pathspec>] [--dry-run]` | Move protected files to the current generation ([09](09-rotation-recovery.md)). |
+| `securegit verify [--history\|--access]` | The audit in [13](13-verify.md). Implemented: the base form (config + index checks, leak/advice scan), `--history` (a real commit walk — CI-tier speed, not pre-commit), and `--access` (who can read this repository). Not yet: `--json`. |
+| `securegit reencrypt [--paths <pathspec>] [--dry-run]` | Move protected files to the current generation ([09](09-rotation-recovery.md)). Stages via plumbing — never writes the worktree file. `--paths` is a prefix match, not full git pathspec syntax. |
 
 ### Filters — invoked by Git, not by people
 
@@ -42,20 +61,36 @@ in their base form — `verify --history`/`--access`/`--json` are not implemente
 | `securegit merge -- <base> <ours> <theirs> <markerSize> <path>` | — | — (writes ciphertext to `<ours>` directly; see [12](12-diff-merge.md)) |
 | `securegit filter-process` | pkt-line ([11](11-filter-process.md)) | pkt-line |
 
+### Identity ([08](08-multi-recipient.md))
+
+| Command | Effect |
+|---|---|
+| `securegit identity init [--label <label>]` | Generate an X25519 keypair, wrap the private half via the same `KeyProvider` port a repository uses, write `~/.securegit/identity.json`. Refuses if one already exists. |
+| `securegit identity show` | Print the identity's fingerprint and `SGPUB1…`-encoded public key — the string to hand to someone who already has access. |
+
 ### Keys
 
 | Command | Effect |
 |---|---|
 | `securegit key init` | Generate generation 1 and wrap it. Implied by `init`. |
 | `securegit key list` | Generations, fingerprints, dates, current marker. |
-| `securegit key rotate [--bind-path]` | Add a generation ([09](09-rotation-recovery.md)). |
+| `securegit key rotate [--bind-path]` | Add a generation ([09](09-rotation-recovery.md)); wraps it for every provider and every existing recipient. Refuses a dirty working tree or a locked repository (locked is checked first). `--bind-path` refuses (exit 4) — not implemented, since `config.ts` has no primitive to update an already-initialised repository's `bindPath`. |
 | `securegit key add-provider <id>` | Wrap every generation with an additional provider. |
 | `securegit key remove-provider <id>` | Refused if it is the last non-custodial provider. |
-| `securegit key add-recipient <pubkey> [--label]` | Wrap every generation for a recipient ([08](08-multi-recipient.md)). |
-| `securegit key remove-recipient <fingerprint>` | Delete the recipient file. Prints the rotation warning. |
+| `securegit key add-recipient <pubkey> [--label <label>]` | Wraps every generation the caller currently holds for a recipient's public key ([08](08-multi-recipient.md)), writes `.securegit/recipients/<fingerprint>.json`. Refuses a malformed public key or a locked repository. `addedBy` is the caller's own identity fingerprint if `identity init` has been run locally, else blank — not an error, since the caller may only have direct keyring access. |
+| `securegit key remove-recipient <fingerprint>` | Delete the recipient file. Prints the rotation warning — removal alone does not revoke access to generations already shared; that needs `key rotate` + `reencrypt`, both built now. Refuses (exit 4) if no file exists for that fingerprint. Does not yet refuse removing the last recipient. |
 | `securegit key list-recipients` | Fingerprint, label, added-at, added-by, generations covered. |
-| `securegit key export-recovery --out <file>` | Recovery file plus a one-time code. |
-| `securegit key import-recovery --in <file>` | Rebuild a keyring from file + code. |
+| `securegit key export-recovery --out <file>` | Recovery file plus a one-time code, printed to stderr once ([09](09-rotation-recovery.md)). Reads every generation from the unlocked session — no separate secret needed. `--out` is required (no default filename); exits locked if the session is locked. Appends an entry to the committed `.securegit/recovery-log.json` (never the code, never the file's content). |
+| `securegit key import-recovery --in <file>` | Rebuild a keyring from file + code, wrapped by a freshly chosen local passphrase. `--in` is required. Needs two secrets: `SECUREGIT_RECOVERY_CODE` and `SECUREGIT_PASSPHRASE` (or, on the stdin fallback, code then passphrase, one per line). A `repoId` mismatch exits misconfigured (2, checked before decrypting); a syntactically valid but wrong code exits locked (1); a malformed code (fails its own checksum) exits usage (4). |
+
+`unlock` itself now has two paths, tried in order: the ordinary local
+keyring, and — only when no local keyring exists — a bootstrap from
+`.securegit/recipients/<the local identity's fingerprint>.json`, decrypting
+via the local `~/.securegit/identity.json` and writing a session (not a
+persisted local keyring; see [08](08-multi-recipient.md) for why). A machine
+with neither a keyring nor an identity gets a message naming both ways
+forward: `securegit init`, or `securegit identity init` plus asking an
+existing member to run `key add-recipient`.
 
 ### Session
 
@@ -197,6 +232,8 @@ script that wants `status`/`inspect` output on stdout deliberately.
 | Unknown flag exits 4 with usage | `src/cli.test.ts` | — | ✅ |
 | `init` outside a repository exits 4 | `src/cli.test.ts` | — | ✅ |
 | `init` twice exits 4 rather than regenerating a key | `src/cli.test.ts` | — | ✅ |
+| `init --pad-to` sets `padTo`; `0` by default; a negative or non-numeric value exits 4 | `src/cli.test.ts` | — | ✅ |
+| `clean`/`smudge` round-trip through the real CLI with `padTo` set, `padded` flag correctly recorded | `src/cli.test.ts` | — | ✅ |
 | `encrypt`/`decrypt` round-trip via stdin and stdout | `src/cli.test.ts` | — | ✅ |
 | `encrypt`/`decrypt` produce the same bytes as the filters | `src/cli.test.ts` | — | 🔲 |
 | No command prints key material at `--verbose` | `src/cli.test.ts` | — | 🔲 |
@@ -212,11 +249,39 @@ script that wants `status`/`inspect` output on stdout deliberately.
 | `merge` exits 1 on a real conflict, with markers visible once decrypted | `src/cli.test.ts` | — | ✅ |
 | `merge` exits 4 when an argument is missing | `src/cli.test.ts` | — | ✅ |
 | `merge` exits locked (1) with no current generation to encrypt the result under | `src/cli.test.ts` | — | ✅ |
+| `identity init` writes `~/.securegit/identity.json`, refuses a second run | `src/cli.test.ts` | — | ✅ |
+| `identity show` exits misconfigured (2) before init, prints the public key to stderr after | `src/cli.test.ts` | — | ✅ |
+| `key add-recipient` exits locked (1) against a locked repository | `src/cli.test.ts` | — | ✅ |
+| `key add-recipient` exits usage (4) on a malformed public key | `src/cli.test.ts` | — | ✅ |
+| `key remove-recipient` deletes the file, exits usage (4) if it never existed | `src/cli.test.ts` | — | ✅ |
+| End-to-end: a second identity joins via `add-recipient`, `unlock`s with no local keyring, and decrypts | `src/cli.test.ts` | — | ✅ |
+| `unlock` names both `init` and `identity init` when neither a keyring nor an identity exists | `src/cli.test.ts` | — | ✅ |
+| `key rotate` refuses `--bind-path`, a dirty tree, and a locked repository (locked checked first) | `src/cli.test.ts` | — | ✅ |
+| `key rotate` invalidates the session and rewraps every existing recipient | `src/cli.test.ts` | — | ✅ |
+| `reencrypt` stages a re-encrypted blob without touching the worktree file; `--dry-run` stages nothing; a no-op once current | `src/cli.test.ts` | — | ✅ |
+| `key export-recovery` requires `--out`, exits locked without an unlocked session, prints the code to stderr only | `src/cli.test.ts` | — | ✅ |
+| `key export-recovery` appends to the committed recovery log | `src/cli.test.ts` | — | ✅ |
+| `key import-recovery` requires `--in`, exits usage on a missing file | `src/cli.test.ts` | — | ✅ |
+| `key import-recovery` exits misconfigured on a `repoId` mismatch, checked before decrypting | `src/cli.test.ts` | — | ✅ |
+| `key import-recovery` exits locked on a syntactically valid but wrong code | `src/cli.test.ts` | — | ✅ |
+| `key import-recovery` falls back to two-line stdin (code, then passphrase) with no env vars set | `src/cli.test.ts` | — | ✅ |
+| End-to-end: `export-recovery` on one machine, `import-recovery` onto a fresh home, `unlock`, and decrypt | `src/cli.test.ts` | — | ✅ |
+| `runFilterProcess` exits misconfigured before `init`; resolves once stdin ends | `src/cli.test.ts` | — | ✅ |
+| `runFilterProcess` serves a real handshake, capabilities, and a clean/smudge round trip | `src/cli.test.ts` | — | ✅ |
+| `filter-process` output matches the one-shot `clean` CLI form, byte for byte | `src/cli.test.ts` | — | ✅ |
+| `runFilterProcess` resolves with the usage exit code on a protocol violation, without hanging | `src/cli.test.ts` | — | ✅ |
+| `runFilterProcess` serializes chunks that arrive before the previous one finished | `src/cli.test.ts` | — | ✅ |
+| `verify --history` exits 0 with no plaintext ever committed | `src/cli.test.ts` | — | ✅ |
+| `verify --history` exits leaked (5), reporting first/last commit | `src/cli.test.ts` | — | ✅ |
+| `verify --access` reports "(none)" everywhere for a fresh solo repository | `src/cli.test.ts` | — | ✅ |
+| `verify --access` lists a recipient, a recovery export, and a removed recipient | `src/cli.test.ts` | — | ✅ |
 
 ## Relationship to Other Specs
 
 - [02](02-git-integration.md) — what `install` and `protect` write
 - [07](07-unlock-session.md) — `unlock`, `lock`, `status`
+- [08](08-multi-recipient.md) — `identity`, `key add-recipient`/`remove-recipient`, and `unlock`'s recipient-file path
+- [09](09-rotation-recovery.md) — `key rotate`, `reencrypt`, and why locked is checked before the dirty-tree check
 - [11](11-filter-process.md) — `filter-process`
 - [12](12-diff-merge.md) — `merge`, and why exit 1 has two meanings there
 - [13](13-verify.md) — `verify` and exit code 5

@@ -1,19 +1,21 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { execFile as execFileCb } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdtemp, rm, writeFile, readFile } from 'node:fs/promises';
+import { mkdtemp, rm, mkdir, writeFile, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { install, protect, EXCLUSION_LINE } from './install.js';
 import { initConfig, resolveKeyringPath } from './config.js';
-import { createKeyring, writeKeyringFile } from './keyring.js';
+import { createKeyring, readKeyringFile, writeKeyringFile, rotateKeyring } from './keyring.js';
 import { PassphraseFileProvider } from './provider.js';
 import type { KeyProvider, ProviderContext, ProviderInfo, ProviderState, WrappedKey } from './provider.js';
 import { seal } from './envelope.js';
 import {
   verify,
   verifyExitCode,
+  accessReport,
+  historyReport,
   NAME_HEURISTICS,
   CONTENT_HEURISTICS,
   EXIT_VERIFY_OK,
@@ -21,6 +23,17 @@ import {
   EXIT_VERIFY_LEAK,
   type VerifyReport,
 } from './verify.js';
+import { generateX25519KeyPair, identityFingerprint } from './identity.js';
+import {
+  wrapAllGenerations,
+  writeRecipientFile,
+  recipientPath,
+  appendRemovedRecipientLogEntry,
+  removedRecipientsLogPath,
+  type RecipientFile,
+} from './recipients.js';
+import { appendRecoveryLogEntry, recoveryLogPath } from './recovery.js';
+import type { KeySource } from './filter.js';
 
 const execFile = promisify(execFileCb);
 const PASSPHRASE = 'correct horse battery staple';
@@ -289,6 +302,55 @@ describe('verify()', () => {
     expect(verifyExitCode(report)).toBe(EXIT_VERIFY_LEAK);
   });
 
+  it('reports an untracked .orig file beside a protected path (T12)', async () => {
+    const { rmk, keyId, provider } = await setUpProtectedRepo();
+    await commitEncrypted(rmk, keyId, 'config/production.json', Buffer.from('{"password":"hunter2"}\n'));
+    // A conflicted merge would leave this: the plaintext pre-merge content,
+    // untracked, sitting right next to the protected path. `commitEncrypted`
+    // stages via plumbing and never touches the worktree, so `config/` has
+    // to be created here.
+    await mkdir(join(dir, 'config'), { recursive: true });
+    await writeFile(join(dir, 'config', 'production.json.orig'), '{"password":"hunter2"}\n');
+
+    const report = await verify({ repoDir: dir, home, providers: [provider] });
+    const residue = report.findings.find(
+      (f) => f.kind === 'residue' && f.path === 'config/production.json.orig',
+    );
+    expect(residue).toBeDefined();
+    expect(verifyExitCode(report)).toBe(EXIT_VERIFY_MISCONFIGURED);
+  });
+
+  it('reports an untracked vim swap file beside a protected path (T12)', async () => {
+    const { rmk, keyId, provider } = await setUpProtectedRepo();
+    await commitEncrypted(rmk, keyId, 'config/production.json', Buffer.from('{"password":"hunter2"}\n'));
+    await mkdir(join(dir, 'config'), { recursive: true });
+    await writeFile(join(dir, 'config', '.production.json.swp'), 'vim swap contents');
+
+    const report = await verify({ repoDir: dir, home, providers: [provider] });
+    const residue = report.findings.find(
+      (f) => f.kind === 'residue' && f.path === 'config/.production.json.swp',
+    );
+    expect(residue).toBeDefined();
+  });
+
+  it('does not report a residue-shaped file that does not exist', async () => {
+    const { rmk, keyId, provider } = await setUpProtectedRepo();
+    await commitEncrypted(rmk, keyId, 'config/production.json', Buffer.from('{"password":"hunter2"}\n'));
+
+    const report = await verify({ repoDir: dir, home, providers: [provider] });
+    expect(report.findings.some((f) => f.kind === 'residue')).toBe(false);
+    expect(verifyExitCode(report)).toBe(EXIT_VERIFY_OK);
+  });
+
+  it('does not report a residue-shaped file that is itself tracked', async () => {
+    const { rmk, keyId, provider } = await setUpProtectedRepo();
+    await commitEncrypted(rmk, keyId, 'config/production.json', Buffer.from('{"password":"hunter2"}\n'));
+    await commitPlaintext('config/production.json.bak', 'deliberately tracked, not residue');
+
+    const report = await verify({ repoDir: dir, home, providers: [provider] });
+    expect(report.findings.some((f) => f.kind === 'residue')).toBe(false);
+  });
+
   it('exposes the heuristic lists used for advice findings', () => {
     expect(NAME_HEURISTICS.length).toBeGreaterThan(0);
     expect(CONTENT_HEURISTICS.length).toBeGreaterThan(0);
@@ -305,6 +367,14 @@ describe('verifyExitCode()', () => {
       findings: [{ kind: 'leak', path: 'a', detail: 'x' }],
     };
     expect(verifyExitCode(report)).toBe(EXIT_VERIFY_LEAK);
+  });
+
+  it('is 2 when a residue finding is present and there is no leak', () => {
+    const report: VerifyReport = {
+      checks: [{ id: 'filter-required', label: 'x', ok: true }],
+      findings: [{ kind: 'residue', path: 'a.orig', detail: 'x' }],
+    };
+    expect(verifyExitCode(report)).toBe(EXIT_VERIFY_MISCONFIGURED);
   });
 
   it('is 2 when a check fails and there is no leak', () => {
@@ -325,5 +395,200 @@ describe('verifyExitCode()', () => {
 
   it('is 0 for an entirely empty report', () => {
     expect(verifyExitCode({ checks: [], findings: [] })).toBe(EXIT_VERIFY_OK);
+  });
+});
+
+function singleKeySource(keyId: string, rmk: Buffer): KeySource {
+  return {
+    current: () => ({ keyId, rmk }),
+    find: (id) => (id === keyId ? rmk : null),
+    available: () => [keyId],
+  };
+}
+
+describe('accessReport()', () => {
+  it('reports one provider covering the current generation, and nothing else, for a plain solo repo', async () => {
+    await setUpProtectedRepo();
+    const report = await accessReport({ repoDir: dir, home });
+    expect(report.recipients).toEqual([]);
+    expect(report.providers).toEqual([{ id: 'passphrase-file', generations: [1] }]);
+    expect(report.recoveryExports).toEqual([]);
+    expect(report.removedRecipients).toEqual([]);
+  });
+
+  it('lists a recipient with the generations their file actually covers', async () => {
+    const { repoId, rmk, keyId } = await setUpProtectedRepo();
+    const recipientKeyPair = generateX25519KeyPair();
+    const fingerprint = identityFingerprint(recipientKeyPair.publicKey);
+    const wrapped = wrapAllGenerations(singleKeySource(keyId, rmk), [keyId], recipientKeyPair.publicKey, repoId);
+    const file: RecipientFile = {
+      version: 1,
+      fingerprint,
+      publicKey: 'SGPUB1-does-not-need-to-decode-for-this-test',
+      label: 'laptop',
+      addedAt: '2026-01-14T00:00:00.000Z',
+      addedBy: 'b30f92ac',
+      keys: wrapped,
+    };
+    await writeRecipientFile(recipientPath(dir, fingerprint), file);
+
+    const report = await accessReport({ repoDir: dir, home });
+    expect(report.recipients).toEqual([
+      { fingerprint, label: 'laptop', addedAt: '2026-01-14T00:00:00.000Z', addedBy: 'b30f92ac', generations: [1] },
+    ]);
+  });
+
+  it('providers section reflects coverage across a rotation, not just the current generation', async () => {
+    const { repoId, provider } = await setUpProtectedRepo();
+    const keyringPath = resolveKeyringPath(repoId, home);
+    const before = await readKeyringFile(keyringPath);
+    const { file: rotated } = await rotateKeyring(before, [provider]);
+    await writeKeyringFile(keyringPath, rotated);
+
+    const report = await accessReport({ repoDir: dir, home });
+    expect(report.providers).toEqual([{ id: 'passphrase-file', generations: [1, 2] }]);
+  });
+
+  it('providers section is empty, not an error, when no local keyring exists', async () => {
+    // A machine that joined purely via a recipient file (08-multi-recipient.md)
+    // has no keyring.json at all — accessReport must not throw for it.
+    await initConfig(dir);
+    await install({ repoDir: dir });
+    await protect(dir, ['config/production.json']);
+    await execFile('git', ['add', '-A'], { cwd: dir });
+    await execFile('git', ['commit', '--quiet', '-m', 'init'], { cwd: dir });
+
+    const report = await accessReport({ repoDir: dir, home });
+    expect(report.providers).toEqual([]);
+  });
+
+  it('lists recovery exports from the committed recovery log', async () => {
+    await setUpProtectedRepo();
+    await appendRecoveryLogEntry(recoveryLogPath(dir), {
+      exportId: 'ab12cd34',
+      timestamp: '2026-01-20T00:00:00.000Z',
+      exportedBy: 'b30f92ac',
+      generations: [1],
+    });
+
+    const report = await accessReport({ repoDir: dir, home });
+    expect(report.recoveryExports).toEqual([
+      { exportId: 'ab12cd34', timestamp: '2026-01-20T00:00:00.000Z', exportedBy: 'b30f92ac', generations: [1] },
+    ]);
+  });
+
+  it('lists removed recipients with the generations they can still read', async () => {
+    await setUpProtectedRepo();
+    await appendRemovedRecipientLogEntry(removedRecipientsLogPath(dir), {
+      fingerprint: '9d1c04ff72ab3e58',
+      label: 'contractor',
+      removedAt: '2026-06-01T00:00:00.000Z',
+      removedBy: 'b30f92ac',
+      generations: [1, 2],
+    });
+
+    const report = await accessReport({ repoDir: dir, home });
+    expect(report.removedRecipients).toEqual([
+      {
+        fingerprint: '9d1c04ff72ab3e58',
+        label: 'contractor',
+        removedAt: '2026-06-01T00:00:00.000Z',
+        removedBy: 'b30f92ac',
+        generations: [1, 2],
+      },
+    ]);
+  });
+});
+
+describe('historyReport()', () => {
+  it('finds plaintext committed on a branch unreachable from HEAD (main)', async () => {
+    await protect(dir, ['config/production.json']);
+    await execFile('git', ['add', '-A'], { cwd: dir });
+    await execFile('git', ['commit', '--quiet', '-m', 'protect'], { cwd: dir });
+
+    await execFile('git', ['checkout', '-b', 'feature'], { cwd: dir });
+    await commitPlaintext('config/production.json', '{"password":"leaked-on-branch"}\n');
+    await execFile('git', ['checkout', 'main'], { cwd: dir });
+    await commitPlaintext('README.md', '# ok\n'); // unrelated commit on main; feature never merged
+
+    const report = await historyReport({ repoDir: dir });
+    const finding = report.findings.find((f) => f.path === 'config/production.json');
+    expect(finding).toBeDefined();
+    expect(finding!.reachableFrom).toContain('feature');
+    expect(finding!.reachableFrom).not.toContain('main');
+  });
+
+  it('does not flag a file that predates protection, and does flag one leaked after it — proving per-commit attribute resolution', async () => {
+    // Committed before `.gitattributes` exists at all: not protected then,
+    // so reporting it as a leak would be wrong in that direction.
+    await commitPlaintext('config/production.json', '{"password":"predates-securegit"}\n');
+
+    await protect(dir, ['config/production.json']);
+    await execFile('git', ['add', '-A'], { cwd: dir });
+    await execFile('git', ['commit', '--quiet', '-m', 'protect'], { cwd: dir });
+
+    // Committed after protection exists: this one must be flagged. If the
+    // engine always answered the same way regardless of commit, one of
+    // these two assertions would fail.
+    await commitPlaintext('config/production.json', '{"password":"leaked-after-protection"}\n');
+
+    const report = await historyReport({ repoDir: dir });
+    const finding = report.findings.find((f) => f.path === 'config/production.json');
+    expect(finding).toBeDefined();
+    expect(finding!.commitCount).toBe(1); // only the post-protection commit
+  });
+
+  it('finds a textconv notes ref and counts its entries', async () => {
+    await protect(dir, ['config/production.json']);
+    await execFile('git', ['add', '-A'], { cwd: dir });
+    await execFile('git', ['commit', '--quiet', '-m', 'protect'], { cwd: dir });
+    const head = (await execFile('git', ['rev-parse', 'HEAD'], { cwd: dir })).stdout.trim();
+
+    await execFile(
+      'git',
+      ['notes', '--ref', 'textconv/securegit', 'add', '-m', 'cached plaintext from textconv', head],
+      { cwd: dir },
+    );
+
+    const report = await historyReport({ repoDir: dir });
+    expect(report.textconvNotesRef).toEqual({ present: true, count: 1 });
+  });
+
+  it('reports no textconv notes ref when none exists', async () => {
+    await protect(dir, ['config/production.json']);
+    await execFile('git', ['add', '-A'], { cwd: dir });
+    await execFile('git', ['commit', '--quiet', '-m', 'protect'], { cwd: dir });
+
+    const report = await historyReport({ repoDir: dir });
+    expect(report.textconvNotesRef).toEqual({ present: false, count: 0 });
+  });
+
+  it('examines each blob OID once, even when it appears unchanged across many commits', async () => {
+    await protect(dir, ['config/production.json']);
+    await execFile('git', ['add', '-A'], { cwd: dir });
+    await execFile('git', ['commit', '--quiet', '-m', 'protect'], { cwd: dir });
+    await commitPlaintext('config/production.json', '{"password":"same-every-time"}\n');
+    // Two more commits that never touch the protected path — its blob SHA
+    // is identical in all three commits' trees.
+    await commitPlaintext('other-a.txt', 'a\n');
+    await commitPlaintext('other-b.txt', 'b\n');
+
+    const examined: string[] = [];
+    const report = await historyReport({ repoDir: dir, onBlobExamined: (sha) => examined.push(sha) });
+
+    const finding = report.findings.find((f) => f.path === 'config/production.json');
+    expect(finding?.commitCount).toBe(3); // present, unchanged, in all three commits
+    expect(examined).toHaveLength(1); // but its content was only ever read once
+  });
+
+  it('reports commitsWalked as the total number of reachable commits', async () => {
+    await protect(dir, ['config/production.json']);
+    await execFile('git', ['add', '-A'], { cwd: dir });
+    await execFile('git', ['commit', '--quiet', '-m', 'protect'], { cwd: dir });
+    await commitPlaintext('a.txt', 'a\n');
+    await commitPlaintext('b.txt', 'b\n');
+
+    const report = await historyReport({ repoDir: dir });
+    expect(report.commitsWalked).toBe(3);
   });
 });

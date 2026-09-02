@@ -29,6 +29,72 @@ Three properties make it work rather than merely encrypt:
    a provider that could be compelled is marked as such, in the tool's own
    output ([06](06-key-provider-port.md)).
 
+## Why this, and not `git-crypt` / SOPS / `age`
+
+The mechanism — a Git clean/smudge filter — is not novel. `git-crypt` has done
+transparent file encryption for years, and wiring SOPS through the same
+filter hooks is a well-known pattern. **The differentiation this project
+bets on is not the mechanism; it's what sits behind it.**
+
+| | `git-crypt` | SOPS | `age` (+ plugins) | `securegit` |
+|---|---|---|---|---|
+| Transparent (`add`/`commit`/`push`, workflow unchanged) | yes | no — `sops` runs explicitly, outside Git | no — a primitive, not a Git integration | yes |
+| Multi-recipient without duplicating the secret | GPG only | yes — its strength | yes — its strength | yes, via the `KeyProvider` port ([06](06-key-provider-port.md)) |
+| Hardware-backed keys | no | via whichever backend it's pointed at | yes — a growing plugin ecosystem | designed for, not yet shipped — same port |
+| States which custodians could be compelled | no | no | no | yes — `securegit status`'s own output |
+| Runtime dependencies | none | several | none | none ([16](16-adversarial-integrity.md), T11) |
+
+Two things make "another `git-crypt`" or "a SOPS wrapper" the wrong frame:
+
+1. **No single custodial party can ever be the sole decryption path.** That
+   was the design mandate from the first line of this project
+   ([01](01-threat-model.md)): "KMS may never be the sole root of the key
+   hierarchy... a repository whose only unwrap path is a KMS key has
+   re-created the property it set out to remove." `securegit status` prints
+   which of a repository's providers are custodial — not as a feature, as a
+   warning. A team that wraps every generation with one KMS key has rebuilt
+   the exact single point of trust this tool exists to avoid.
+2. **Key lifecycle is the hard part, and it has to work without touching
+   already-committed ciphertext.** Losing a hardware key revokes its
+   wrapper; a new machine adds one; neither operation re-encrypts anything.
+   The per-generation wrapping in [05](05-key-hierarchy.md) is built for
+   exactly this — it's the reason a random per-file DEK (the "obvious"
+   design) was rejected in favour of deriving one, and the reason
+   [09](09-rotation-recovery.md) exists at all.
+
+**What this deliberately rules out:** depending on `age` (or a similar
+library) at the crypto layer. `age`'s own file format is non-deterministic —
+a fresh ephemeral key per encryption — which would break the one property
+[03](03-determinism.md) is built around: `clean` must be a pure function of
+its input, or `git status` never goes clean after `git add`. And a runtime
+dependency at all conflicts with T11
+([16](16-adversarial-integrity.md)) — a package that holds encryption keys is
+an unusually attractive place for a supply-chain attack, which is why this
+one has none. Hardware-backed identities stay reachable the way
+[06](06-key-provider-port.md) already intends: a future provider that shells
+out to an already-installed binary (`age-plugin-yubikey`, `ykman`, whatever a
+given backend needs) — the same relationship this tool already has with
+`git` itself — not an npm dependency.
+
+The bar for the first thirty seconds, once this ships:
+
+```
+securegit init
+securegit protect config/production.json
+git add . && git commit -m "hello" && git push
+```
+
+and, on a second machine that already holds a key for this repository:
+
+```
+git clone …
+securegit unlock
+```
+
+Everything the repository holds is ciphertext in between. Nothing about the
+day-to-day workflow changes — which is the whole pitch, and the reason the
+mechanism being unoriginal doesn't matter.
+
 ## Documents
 
 ### Foundations (01–03)
@@ -98,7 +164,7 @@ stat-cache silently no-ops on an already-checked-out path). 9 tests, all
 green, plus one further subprocess smoke test
 (`src/bin.integration.test.ts`) proving the CLI wiring itself.
 
-**Phase 2 has started:** `src/verify.ts` ([13](13-verify.md)) implements the
+**Phase 2:** `src/verify.ts` ([13](13-verify.md)) implements the
 always-on configuration and index checks — missing filter config, `required`
 turned off, a removed attribute, a conflicting `text`/`ident` attribute, key
 material inside the worktree, a custodial-only provider set — plus the
@@ -108,10 +174,7 @@ leak/advice content scan (19 module tests). `src/merge.ts`
 `smudge`) rather than guessing when a side can't be decrypted, cleans up its
 temp directory on every exit path (10 module tests). Both are now wired into
 `src/cli.ts` as `securegit verify` and `securegit merge`, with CLI-level
-tests proving the wiring (7 more tests). Still open: `verify
---history`/`--access`, and a real `git merge`/`git diff` proof of the merge
-driver driven through actual `.gitattributes` routing rather than a direct
-`securegit merge` call.
+tests proving the wiring (7 more tests).
 
 Failure-message discipline ([15](15-failure-modes.md)) went from designed to
 mostly verified: `src/failure.test.ts` checks that every message this
@@ -125,18 +188,163 @@ but `clean` has no such case; it always fails closed when locked, proven in
 `src/filter.test.ts`. What actually makes F16 true is Git's own stat-cache
 short-circuit skipping `add` entirely for a path whose worktree content
 already matches the index — the same mechanism, from the opposite side, as
-why the F2/F4/F8 recovery isn't `checkout --force`. 361 unit tests total,
-all green; 11 integration tests, all green. What remains: multi-recipient
-sharing, rotation/recovery, `--history`, `--access`, the residue/untracked-residue
-check, and the long-running filter process. TypeScript, `src/` → `dist/`,
-unit tests beside the source, matching `@trinoris/decision-core`.
+why the F2/F4/F8 recovery isn't `checkout --force`.
+
+The residue/untracked-residue check ([16](16-adversarial-integrity.md), T12)
+is the fourth and last item on Phase 2's build order, and it's done: `verify`
+now reports a third finding kind, `residue`, for an untracked `.orig`/`.bak`/
+vim-swap-shaped file sitting beside a protected path — checked against the
+real filesystem, since the whole point is catching what `.gitignore` would
+otherwise hide from view. `src/package.test.ts` is new too, statically
+proving T11 (zero runtime dependencies, no `src/` import outside `node:`
+builtins) and that every non-AEAD comparison in the codebase goes through
+`equalCt`.
+
+**Phase 2 is done, including the real-`git` proof of the merge driver:**
+`install` writes `merge.securegit.name`/`.driver`, `protect` writes
+`merge=securegit` into every attribute line, and
+`src/git.integration.test.ts` drives an actual `git merge` through that
+routing — a non-overlapping merge resolves cleanly (ciphertext committed,
+plaintext in the worktree) and a real conflict leaves plaintext markers in
+the worktree and exits nonzero, exactly as [12](12-diff-merge.md) describes.
+`merge.securegit.driver` joined the T10 foreign-config check too, so a
+repository that already has one configured refuses `install` the same way
+`clean`/`smudge`/`textconv` already did.
+
+374 unit tests total, all green; 13 integration tests, all green.
+
+**Phase 3 has started:** `src/identity.ts` ([08](08-multi-recipient.md))
+implements the X25519 identity keypair, the checksummed `SGPUB1…`
+public-key encoding, the fingerprint, and the identity file — wrapping a
+private key via the same `KeyProvider` port that already protects a
+repository's master key, rather than a parallel wrapping mechanism.
+`src/recipients.ts` implements the repository-key wrap/unwrap construction
+exactly as specified (fresh ephemeral keypair, zero nonce, `repoId ‖
+generation ‖ fingerprint` AAD), `wrapAllGenerations` (the `add-recipient`
+primitive) and `unlockFromRecipientFile` (the recipient-file bootstrap
+primitive). Both are wired into `src/cli.ts`: `identity init`/`show`, `key
+add-recipient`/`remove-recipient`, and a second path inside `unlock` that
+bootstraps a session straight from a recipient file when no local keyring
+exists — no persisted local keyring is written that way yet, since
+`keyring.ts` has no primitive for wrapping several already-known generations
+for a brand-new provider (only fresh-generation-1 creation and
+single-new-generation rotation). An end-to-end `cli.test.ts` test proves the
+whole join flow: a second identity is created, added as a recipient, unlocks
+with zero local keyring, and decrypts what the first identity encrypted.
+
+The same flow is now proven against a real `git clone`/`push`/`pull` too,
+and building that proof caught a real bug the CLI-level test never could:
+**`git pull` runs `clean` as a pre-merge safety check even on tracked paths
+the incoming change never touches**, so a locked repository with the filter
+already attached cannot `git pull` at all — including the very pull that
+would deliver a brand-new recipient the file they need in order to unlock.
+The fix is an ordering constraint in the join flow (a new machine's first
+pull happens before `install`, not after), not a code change — the same
+shape as why a keyless clone that never runs `install` still works.
+Documented as F21 in [15](15-failure-modes.md), with the general mechanism
+in [02](02-git-integration.md).
+
+`key rotate` and `reencrypt` ([09](09-rotation-recovery.md)) are wired in
+too, on top of `rotateKeyring` (`src/keyring.ts`), which already existed.
+Building `key rotate`'s dirty-tree refusal turned up a sibling of F21:
+`git status`'s own comparison has to run `clean` too, so checking status
+before checking "locked" produces a confusing subprocess failure instead of
+a clean "you're locked" message — fixed the same way, by ordering (locked
+checked first). `reencrypt` stages re-encrypted blobs via plumbing, never
+touching the worktree file, and needs no separate "already current" check —
+`clean` is deterministic, so a file already on the current generation
+re-encrypts to byte-identical ciphertext and the diff naturally sees no
+change.
+
+`src/recovery.ts` ([09](09-rotation-recovery.md)) rounds out Phase 3's key
+lifecycle: the export/import recovery file, the recovery code's own
+format/parse/checksum, and the committed recovery log that records that an
+export happened without ever recording the code or the file. It reuses
+`identity.ts`'s Crockford codec instead of a second copy of the same base32
+variant, and the code itself is 58 Crockford characters (32 random bytes
+plus a 4-byte checksum) — the spec's own illustrative example showed 52,
+which is exactly what 256 bits of entropy alone requires with no room left
+for a checksum; adding the checksum as extra characters keeps the code at
+its full promised strength rather than shipping one slightly weaker to fit
+a specific count. `key export-recovery`/`import-recovery` are now wired into
+`src/cli.ts` too, on top of a new `keyringFromRecoveredGenerations`
+(`src/keyring.ts`) — the primitive `unlock`-via-recipient-file was missing
+back in [08](08-multi-recipient.md), needed here to turn a recovered set of
+generations into a full local keyring. Export needs no separate secret (it
+reads the already-unlocked session); import needs two — the recovery code
+and a fresh local passphrase — the one command in this codebase that does.
+
+The long-running filter process ([11](11-filter-process.md)) is built too:
+`src/pktline.ts` (pkt-line framing — `PktLineReader` exposes both a
+whole-list read for headers/capabilities and a one-packet-at-a-time read for
+content, so an oversized blob can be rejected while draining instead of
+buffered whole first) and `src/process.ts` (`FilterProcessServer`, a small
+explicit state machine, plus the `process.stdout` write guard). Session
+expiry is re-checked by re-invoking the injected `keys()` function before
+every command rather than caching anything from handshake time — cheap
+enough that it costs nothing next to the Node-startup savings this exists
+for, and it's the only way a concurrent `lock` gets noticed mid-checkout.
+Proven against a real `git` binary, `install --process` checked out through,
+byte for byte identical to the `clean`/`smudge` form. Two real bugs surfaced
+building this, both fixed and regression-tested: the locked-`clean` path
+originally wrote its error status without ever calling `warn`, so Git's own
+"clean filter failed" carried none of the actual diagnostic (found by
+running a real `git add` against a locked process filter, not from reading
+the spec); and `runFilterProcess` originally handed each stdin chunk to the
+server independently, which could let two chunks process concurrently
+against the server's shared parse state — fixed by chaining chunks onto one
+promise instead.
+
+`verify --access` ([13](13-verify.md)) is built too — `accessReport()` reads
+recipient files, the keyring's own per-generation `provider` field (no
+unwrap), and two committed, append-only logs: the recovery log (now
+recording `generations: number[]` per export, not just the event) and a new
+`.securegit/removed-recipients.json` that `key remove-recipient` writes to
+before deleting a recipient's file, since the deletion itself leaves no
+other trace that the fingerprint ever had access.
+
+`verify --history` is built too — `historyReport()` walks every commit
+reachable from any ref (`git rev-list --all`, not just the checked-out
+branch), resolving `filter=securegit` protection *as it stood at each
+commit* via a temporary index (`GIT_INDEX_FILE` + `read-tree` +
+`check-attr --cached`, batched over every path in one call) rather than
+`check-attr --source <tree-ish>`, which needs Git 2.40 — newer than this
+tool can assume a real clone has. Each blob is content-read at most once via
+a `Map` keyed by its SHA, regardless of how many unchanged commits reference
+it. Findings aggregate per path (first/last commit, a count, which branches
+can still reach it) rather than one row per offending commit, and it also
+reports on `refs/notes/textconv/securegit` — residue from Git's own
+`cachetextconv` optimisation, which caches *decrypted* content once enabled.
+Reading only the first 11 bytes of each blob (the spec's stated
+optimisation) is not built — full content is read instead, a real but
+low-priority simplification, since leaked files are overwhelmingly small.
+
+`init --pad-to` ([14](14-metadata-leakage.md)) is built too — M2's
+mitigation, the one part of metadata leakage this design can actually
+close. `envelope.ts` gained a length-prefixed pad/unpad scheme behind a new
+flags bit (`FLAG_PADDED`), self-describing so `unseal` never needs to know
+what `padTo` a blob was sealed under; `config.ts`'s `RepoConfig.padTo` is
+set only at `init`, immutable after — the same constraint `bindPath`
+already has, for the same reason (no "update a field in place" primitive
+exists for either). Every place that calls `seal` — `clean`, `reencrypt`,
+`merge`, `filter-process`, `encrypt` — now threads it through; `unseal`/
+`smudge`/`decrypt` need no such threading, since the padded state travels
+with the envelope itself. Proven against a real commit: `init --pad-to 256`,
+a 3-byte file, a committed blob well over 256 bytes, and an exact
+3-byte checkout.
+
+554 unit tests total, all green; 25 integration tests, all green. What
+remains: `verify --json`, `status` reporting M1–M12, and the rest of
+padding's genuinely inherent siblings
+([14](14-metadata-leakage.md)). TypeScript, `src/` →
+`dist/`, unit tests beside the source, matching `@trinoris/decision-core`.
 
 | | Implemented | Designed only |
 |---|---|---|
-| Cryptography | derivations, envelope | known-answer vectors |
-| Git integration | clean/smudge/textconv, attributes, real-`git` round trip | process protocol |
-| Keys | keyring, passphrase provider, session | recipients, rotation, recovery |
-| Tooling | CLI (`init`/`install`/`protect`/`unlock`/`lock`/`status`/`verify`/`clean`/`smudge`/`textconv`/`merge`/`encrypt`/`decrypt`/`inspect`) | `verify --history`/`--access`, `filter-process` |
+| Cryptography | derivations, envelope, padding | known-answer vectors |
+| Git integration | clean/smudge/textconv, attributes, filter-process, real-`git` round trip | — |
+| Keys | keyring, passphrase provider, session, identity keypair/encoding, recipient wrap/unwrap, rotation, recovery export/import | — |
+| Tooling | CLI (`init`/`init --pad-to`/`install`/`protect`/`unlock`/`lock`/`status`/`identity`/`key add-recipient`/`key remove-recipient`/`key rotate`/`reencrypt`/`key export-recovery`/`key import-recovery`/`verify`/`verify --access`/`verify --history`/`clean`/`smudge`/`textconv`/`merge`/`encrypt`/`decrypt`/`inspect`/`filter-process`) | `verify --json` |
 
 Ten things worth knowing before reading any spec here. The first three are the
 load-bearing ones; the last two are about scope.
@@ -161,7 +369,13 @@ load-bearing ones; the last two are about scope.
    -- .`. The same stat-cache behaviour also explains why a locked, keyless
    clone can silently `commit` an unmodified protected file: Git never calls
    `clean` at all for a path whose content hasn't changed, so "locked" never
-   gets a chance to block it. [07](07-unlock-session.md),
+   gets a chance to block it. `clean` also runs somewhere non-obvious in the
+   *other* direction: `git pull`, even a plain fast-forward, runs it as a
+   pre-merge safety check on tracked paths the incoming change never
+   touches — so a locked repository with the filter attached cannot `pull`
+   at all (F21), which is why a brand-new recipient's very first pull has to
+   happen before `install`, not after. [02](02-git-integration.md),
+   [07](07-unlock-session.md), [08](08-multi-recipient.md),
    [15](15-failure-modes.md).
 
 3. **`verify` is what makes the rest trustworthy.** Every interesting failure of

@@ -7,7 +7,10 @@ already committed to carrying file content. There is nowhere to prompt for a
 passphrase. This spec is how the key gets to the filter anyway, and what the
 filter does when it does not.
 
-**Status: NOT IMPLEMENTED.**
+**Status: IMPLEMENTED.** `src/session.ts` (the cache, TTL and permission
+hardening) and the clean/smudge asymmetry in `src/filter.ts` are both built
+and tested, including end to end against real `git` in
+`src/git.integration.test.ts`.
 
 ## Core Principle
 

@@ -100,6 +100,7 @@ export async function merge(opts) {
             keyId: current.keyId,
             path: opts.path,
             bindPath,
+            ...(opts.padTo !== undefined ? { padTo: opts.padTo } : {}),
         });
         return { clean, output };
     }

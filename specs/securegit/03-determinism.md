@@ -6,8 +6,12 @@ The single constraint that shapes the cryptography. A clean/smudge filter is not
 free to be a normal encryption function, because Git compares its output to
 decide whether a file has changed.
 
-**Status: NOT IMPLEMENTED.** This is the first thing to build and the first
-thing to test, because every other design choice follows from it.
+**Status: IMPLEMENTED.** This was the first thing built and the first thing
+tested, because every other design choice follows from it — `src/crypto.ts`'s
+keyed convergent nonce, proven in `src/crypto.test.ts` and end to end in
+`src/git.integration.test.ts` (`git status` clean immediately after commit,
+after branch switches, after `stash`/`stash pop`, after re-adding an
+unchanged file).
 
 ## Core Principle
 

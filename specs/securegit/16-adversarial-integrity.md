@@ -6,8 +6,11 @@ The threat model in [01](01-threat-model.md) names the adversaries. This spec
 works through what they actually do, in order of how likely it is to happen to
 somebody using this tool in 2026.
 
-**Status: NOT IMPLEMENTED.** Several mitigations are cheap and belong in the
-first release; they are marked.
+**Status: MOSTLY IMPLEMENTED for the v1-marked mitigations.** T3, T10, T12
+and T13 are done and tested; T1's `verify` detector and T7/T8's key-material
+hardening were already built as part of earlier specs and are cross-checked
+here. What's still open needs specs 08/09 (T5) or spec 11 (part of T13) —
+see the Test Cases table.
 
 ## The thesis
 
@@ -161,6 +164,16 @@ Mitigations, all v1:
   `<pattern>.save` and `.<basename>.sw?`.
 - `verify` reports any *untracked* file matching those shapes next to a
   protected path, so the residue is visible even when `.gitignore` catches it.
+  Implemented as a third `Finding` kind, `'residue'` — checked against the
+  real filesystem (not `git status`), since the point is catching a file
+  `.gitignore` would otherwise hide from view entirely. The plain suffixes
+  (`~`, `.orig`, `.rej`, `.bak`, `.save`) are a direct existence check;
+  vim's actual swap filename varies (`.swp`, then `.swo`, `.swn`, …) so that
+  one scans the directory for anything sharing the `.<basename>.sw` prefix
+  instead of checking one fixed name. `RESIDUE_SUFFIXES` is exported from
+  `install.ts` so both places share one list rather than two that could
+  drift. Contributes to `EXIT_VERIFY_MISCONFIGURED` (2), not the leak exit
+  (5) — real plaintext exposure, but not yet a committed one.
 - The merge driver ([12](12-diff-merge.md)) writes no temporary files outside a
   `0700` directory and removes them on every exit path.
 - `reencrypt` never writes an intermediate plaintext file.
@@ -189,28 +202,33 @@ requests ([11](11-filter-process.md)).
 
 | Test | Test File | Fixture | Status |
 |------|-----------|---------|--------|
-| T1: removed attribute is found by `verify` | `src/verify.test.ts` | `attributes/` | 🔲 |
-| T1: downgrade already in history is found by `verify --history` | `src/verify.test.ts` | `legacy-plaintext/` | 🔲 |
+| T1: removed attribute is found by `verify` | `src/verify.test.ts` | `attributes/` | ✅ |
+| T1: downgrade already in history is found by `verify --history` | `src/verify.test.ts` | — | ✅ |
 | T3: relocated blob fails under `bindPath = true` | `src/envelope.test.ts` | — | ✅ |
 | T3: relocated blob decrypts under `bindPath = false`, as documented | `src/envelope.test.ts` | — | ✅ |
 | T5: `verify --access` names the commit that added each recipient | `src/verify.test.ts` | `identities/` | 🔲 |
 | T5: `rotate` requires confirmation of the recipient count | `src/cli.test.ts` | — | 🔲 |
-| T7: session file with loose permissions is deleted, not used | `src/session.test.ts` | — | 🔲 |
-| T8: scrypt parameters meet the floor | `src/provider.test.ts` | — | 🔲 |
+| T6: the recovery file alone does not decrypt without the code | `src/recovery.test.ts` | — | ✅ |
+| T6: an export appends to the committed recovery log, not the code or file | `src/recovery.test.ts` | — | ✅ |
+| T7: session file with loose permissions is deleted, not used | `src/session.test.ts` | — | ✅ |
+| T8: scrypt parameters meet the floor | `src/provider.test.ts` | — | ✅ |
 | T10: `install` refuses over foreign filter config | `src/install.test.ts` | — | ✅ |
-| T11: the published package has zero runtime dependencies | `src/package.test.ts` | — | 🔲 |
-| T11: no `src/` file imports outside `node:` builtins | `src/package.test.ts` | — | 🔲 |
+| T11: the published package has zero runtime dependencies | `src/package.test.ts` | — | ✅ |
+| T11: no `src/` file imports outside `node:` builtins | `src/package.test.ts` | — | ✅ |
 | T12: `protect` writes the residue `.gitignore` entries | `src/install.test.ts` | — | ✅ |
-| T12: `verify` reports an untracked `.orig` beside a protected path | `src/verify.test.ts` | `legacy-plaintext/` | 🔲 |
-| T12: merge driver leaves no temporary file behind, including on error | `src/merge.test.ts` | — | 🔲 |
+| T12: `verify` reports an untracked `.orig` beside a protected path | `src/verify.test.ts` | `legacy-plaintext/` | ✅ |
+| T12: `verify` reports an untracked vim swap file beside a protected path | `src/verify.test.ts` | — | ✅ |
+| T12: `verify` does not flag a residue-shaped file that is itself tracked | `src/verify.test.ts` | — | ✅ |
+| T12: merge driver leaves no temporary file behind, including on error | `src/merge.test.ts` | — | ✅ |
 | T13: oversized envelope is refused before allocation | `src/envelope.test.ts` | — | ✅ |
 | T13: `filter-process` bounds in-flight bytes | `src/process.test.ts` | — | 🔲 |
-| All non-AEAD comparisons use `timingSafeEqual` | `src/package.test.ts` | — | 🔲 |
+| All non-AEAD comparisons use `timingSafeEqual` | `src/package.test.ts` | — | ✅ |
 
 ## Relationship to Other Specs
 
 - [01](01-threat-model.md) — the adversaries these attacks belong to
 - [04](04-envelope-format.md) — what the AAD binds, and what it does not
 - [05](05-key-hierarchy.md) — `bindPath`, the T3 mitigation
+- [09](09-rotation-recovery.md) — the recovery file/code split behind T6
 - [12](12-diff-merge.md) — the merge driver, source of the `.orig` residue
 - [13](13-verify.md) — the detector for T1, T5 and T12

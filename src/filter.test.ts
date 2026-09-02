@@ -65,6 +65,17 @@ describe('clean()', () => {
     expect(looksLikeEnvelope(clean(Buffer.alloc(0), ctx()))).toBe(true);
   });
 
+  it('pads when ctx.padTo is set, round-tripping through smudge', () => {
+    const out = clean(PT, ctx({ padTo: 64 }));
+    expect(parseEnvelope(out).padded).toBe(true);
+    expect(smudge(out, ctx()).equals(PT)).toBe(true);
+  });
+
+  it('does not pad when padTo is unset — unchanged from before this option existed', () => {
+    const out = clean(PT, ctx());
+    expect(parseEnvelope(out).padded).toBe(false);
+  });
+
   it('round-trips through smudge for random binary content', () => {
     for (let i = 0; i < 20; i++) {
       const pt = randomBytes(Math.floor(Math.random() * 4096));

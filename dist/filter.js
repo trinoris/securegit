@@ -62,6 +62,7 @@ export function clean(input, ctx) {
         path: ctx.path,
         bindPath: ctx.bindPath ?? false,
         ...(ctx.maxBytes !== undefined ? { maxBytes: ctx.maxBytes } : {}),
+        ...(ctx.padTo !== undefined ? { padTo: ctx.padTo } : {}),
     });
 }
 /** `unseal` with `maxBytes` included only when the caller set one. */

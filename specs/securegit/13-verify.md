@@ -7,11 +7,11 @@ that it is still switched on. `securegit verify` is the command that answers
 "has a protected file ever been committed in plaintext, and is this repository
 still configured to prevent it".
 
-**Status: MOSTLY IMPLEMENTED.** `src/verify.ts` implements the always-on
-configuration and index checks (L1–L3, L7–L10) and the leak/advice content
-scan, and it is wired into `src/cli.ts` as `securegit verify`. `--history` and
-`--access` are not built, and `verify` accepts no flags yet (`--json`
-included). See "What this pass actually built" below.
+**Status: IMPLEMENTED.** `src/verify.ts` implements the always-on
+configuration and index checks (L1–L3, L7–L10), the leak/advice content scan,
+`--access` (`accessReport()`), and `--history` (`historyReport()`) — all
+wired into `src/cli.ts` as `securegit verify [--access|--history]`. Only
+`--json` remains unbuilt. See "What this pass actually built" below.
 
 ## Core Principle
 
@@ -69,7 +69,7 @@ protected path, read the blob and require the envelope magic.
      matched by no pattern, but resembles a protected file
 ```
 
-Two distinct findings come out of this pass:
+Three distinct findings come out of `verify` (`FindingKind`: `'leak' | 'advice' | 'residue'`):
 
 - **Leak** — the path *is* protected by an attribute and its blob is plaintext.
   Exit code 5. This is a live failure of L1–L4.
@@ -78,6 +78,13 @@ Two distinct findings come out of this pass:
   content matches high-confidence patterns (`AKIA[0-9A-Z]{16}`,
   `-----BEGIN .* PRIVATE KEY-----`, `xox[baprs]-`). Exit code 0 with a note; the
   tool suggests a `protect` invocation but never edits `.gitattributes` itself.
+- **Residue** ([16](16-adversarial-integrity.md), T12) — an untracked file
+  shaped like editor/merge fallout (`~`, `.orig`, `.rej`, `.bak`, `.save`, a
+  vim swap file) exists on disk beside a *protected* path. Checked against
+  the real filesystem, not `git status`, because the point is catching what
+  `.gitignore` would otherwise hide from view — plaintext that was never
+  committed is still plaintext sitting on disk. Exit code 2 (the
+  misconfigured tier): real, but not the same severity as a committed leak.
 
 ### History — `--history`
 
@@ -99,6 +106,25 @@ as a leak either way would be wrong in one direction or the other.
 Optimisations that matter for this to be usable on a real repository: check each
 blob OID once (`git cat-file --batch-check` over `rev-list --objects`), read only
 the first 11 bytes of each candidate, and cache results by OID.
+
+As built: `git rev-list --all` is the walk (every branch and tag, not just
+the checked-out one — the case this exists for is exactly a commit that
+isn't on the branch someone happens to be looking at). Attributes are
+resolved per commit via a temporary index (`GIT_INDEX_FILE` pointed at a
+scratch file, `git read-tree <sha>`, then `git check-attr --cached -z
+--stdin filter`, batched over every tracked path in one call) rather than
+`git check-attr --source <tree-ish>` — that flag needs Git 2.40, and this
+tool can't assume a real clone is running anything that new. Each blob is
+read at most once via a plain `Map<blobSha, boolean>` keyed on content hash
+(content-addressed storage means the same SHA is always the same bytes) —
+the dedup the optimisation note asks for, reached by a different route than
+`--batch-check`/`rev-list --objects` since this walk only ever needs to
+inspect *protected* paths' blobs, not the whole object graph. Reading only
+the first 11 bytes of each candidate is not built — full blob content is
+read via `git cat-file -p`; leaked files are overwhelmingly small
+config/secret files, not large binaries, so this is a real but low-priority
+simplification, honestly documented rather than silently different from the
+spec.
 
 ### The remediation is not "run a command"
 
@@ -180,12 +206,65 @@ Scope decisions made building it, and why:
   advice-only (exit 0) — `verifyExitCode` checks in that order. A repository
   that is both leaking and missing `filter.securegit.required` is, above all,
   leaking.
-- **`--history` and `--access` are not built.** `--access` cannot exist yet —
-  it reports on recipients, and spec 08 (multi-recipient) has not been built,
-  so there is no recipient list to read. `--history` needs a real commit walk
-  and belongs with its own dedicated test setup (closer in shape to
-  `src/git.integration.test.ts` than the rest of this module); deferred to a
-  later pass.
+- **`--history` is built now too — `historyReport()`, plus `securegit verify
+  --history`.** Its tests live in `verify.test.ts` alongside the rest of the
+  module rather than in a separate `git.integration.test.ts`-shaped file as
+  earlier drafts of this note expected — `verify.test.ts` already spawns a
+  real `git` binary for every check it has (there is no injected-IO form of
+  "resolve attributes as of commit X"), so the history walk fits the
+  existing setup rather than needing its own.
+- **A finding aggregates by *path*, across every commit that had plaintext
+  there — not one finding per offending commit.** `first`/`last` are the
+  oldest and newest commit where the path held plaintext, `commitCount` is
+  how many walked commits had it (not necessarily contiguous — a path can
+  be fixed and later broken again). This matches the spec's own example
+  ("14 commits") more directly than a per-commit finding list would.
+- **`reachableFrom` reports local branches, not tags — `git branch
+  --contains`, not `git tag --contains` or a combination.** The spec's
+  example asks specifically "still reachable from main"; tags mark points
+  in history rather than active development lines, and mixing the two would
+  make "reachable from" a less useful signal for "is anyone likely to still
+  check this out," not a more complete one.
+- **The exit code for `--history` is a plain leak/no-leak decision (5 or
+  0)** — a history finding is still a leak, the same severity as one caught
+  by the base form's index scan, just found by a different walk; there's no
+  reason for the two to disagree on precedence.
+- **`--access` is built now that spec 08 (multi-recipient) and 09
+  (rotation/recovery) exist to read from.** `accessReport()` touches no
+  session and unwraps no key, same discipline as `verify()` itself — it
+  reads recipient files, the keyring's own `provider` field on each wrapped
+  slot (not a fresh unwrap), and two append-only logs
+  (`.securegit/recovery-log.json`, and a new
+  `.securegit/removed-recipients.json` — see below).
+- **A recipient's or provider's generation coverage is reported as a range
+  (`gen 1–3`) when contiguous, or an explicit list (`gen 1,3`) when it isn't,
+  rather than always assuming contiguity.** In practice a gap shouldn't
+  happen — `key rotate` rewraps every existing recipient unconditionally —
+  but the formatter doesn't get to assume that just because nothing in this
+  codebase currently produces a gap.
+- **The recovery log gained a `generations: number[]` field it didn't have
+  before**, so `--access` can report what an export actually covers (the
+  spec's own example shows "covers gen 1"). This is public metadata — which
+  generations, not the code or the file's content — so adding it doesn't
+  weaken the log's existing "never the secret" guarantee
+  ([09](09-rotation-recovery.md)).
+- **`key remove-recipient` deletes the recipient file with no tombstone left
+  behind, so nothing on disk recorded that a fingerprint ever had access at
+  all — a gap `--access`'s "removed recipients" section needs closed.**
+  Rather than require `--access` to walk Git history for a deleted file (real
+  complexity that belongs with `--history`'s own future commit-walking
+  machinery, not duplicated here), `key remove-recipient` now reads the
+  recipient file *before* deleting it and appends `{fingerprint, label,
+  removedAt, removedBy, generations}` to a new committed
+  `.securegit/removed-recipients.json` — `recipients.ts`'s
+  `removedRecipientsLogPath`/`appendRemovedRecipientLogEntry`/
+  `readRemovedRecipientsLog`, mirroring `recovery.ts`'s log in shape and
+  intent. Never the recipient's still-wrapped keys, which cease to exist
+  once the file itself is deleted.
+- **`verify --access` needs no key either — it's wired the same way as the
+  base `verify` form**: a `PassphraseFileProvider` is never even constructed
+  for it, since `accessReport()` reads the keyring's `provider` field
+  directly rather than calling `describe()` on anything.
 - **`securegit verify` is now wired into `src/cli.ts`.** `cmdVerify` needs no
   passphrase or session — it constructs a `PassphraseFileProvider` purely to
   call `describe()` for the L10 check, never `unwrap()` — prints each check
@@ -213,14 +292,26 @@ Scope decisions made building it, and why:
 | `text` on a protected path is reported (L8) | `src/verify.test.ts` | `attributes/` | ✅ |
 | Keyring inside the worktree is reported (L9) | `src/verify.test.ts` | — | ✅ |
 | Custodial-only provider set is reported (L10) | `src/verify.test.ts` | — | ✅ |
-| `--history` finds plaintext in an unreachable-from-HEAD-but-reachable commit | `src/verify.test.ts` | `legacy-plaintext/` | 🔲 |
-| `--history` resolves attributes as of each commit | `src/verify.test.ts` | `legacy-plaintext/` | 🔲 |
-| `--history` does not flag a file unprotected at the time it was committed | `src/verify.test.ts` | `legacy-plaintext/` | 🔲 |
-| `--history` finds a textconv notes ref | `src/verify.test.ts` | `legacy-plaintext/` | 🔲 |
-| Each blob OID is examined once | `src/verify.test.ts` | `legacy-plaintext/` | 🔲 |
+| `historyReport()` finds plaintext committed on a branch unreachable from HEAD | `src/verify.test.ts` | — | ✅ |
+| `historyReport()` resolves attributes as of each commit (both directions) | `src/verify.test.ts` | — | ✅ |
+| `historyReport()` does not flag a file that predates protection | `src/verify.test.ts` | — | ✅ |
+| `historyReport()` finds a textconv notes ref and counts its entries | `src/verify.test.ts` | — | ✅ |
+| `historyReport()` reports no textconv notes ref when none exists | `src/verify.test.ts` | — | ✅ |
+| Each blob OID is examined once, even unchanged across many commits | `src/verify.test.ts` | — | ✅ |
+| `commitsWalked` reports the total reachable commit count | `src/verify.test.ts` | — | ✅ |
+| `verify --history` exits 0 with no plaintext ever committed | `src/cli.test.ts` | — | ✅ |
+| `verify --history` exits leaked (5), reporting first/last commit and the rotate-the-secret note | `src/cli.test.ts` | — | ✅ |
 | Leak exits 5; advice exits 0; misconfiguration exits 2 | `src/verify.test.ts` | — | ✅ |
-| `--access` lists removed recipients with their generation range | `src/verify.test.ts` | `identities/` | 🔲 |
-| `--access` warns about recovery exports | `src/verify.test.ts` | — | 🔲 |
+| `accessReport()` reports one provider covering the current generation for a plain solo repo | `src/verify.test.ts` | — | ✅ |
+| `accessReport()` lists a recipient with the generations their file actually covers | `src/verify.test.ts` | — | ✅ |
+| `accessReport()` providers section reflects coverage across a rotation | `src/verify.test.ts` | — | ✅ |
+| `accessReport()` providers section is empty, not an error, with no local keyring | `src/verify.test.ts` | — | ✅ |
+| `accessReport()` lists recovery exports from the committed log | `src/verify.test.ts` | — | ✅ |
+| `accessReport()` lists removed recipients with their generation range | `src/verify.test.ts` | — | ✅ |
+| `verify --access` reports "(none)" everywhere for a fresh solo repository, exits 0 | `src/cli.test.ts` | — | ✅ |
+| `verify --access` lists a recipient added via `key add-recipient` | `src/cli.test.ts` | — | ✅ |
+| `verify --access` lists a recovery export, with the non-revocable-access warning | `src/cli.test.ts` | — | ✅ |
+| `verify --access` lists a removed recipient, with the "can still read" note | `src/cli.test.ts` | — | ✅ |
 | `--json` output validates against its schema | `src/verify.test.ts` | — | 🔲 |
 | `verify` runs without a key present | `src/verify.test.ts` | `repo-protected/` | ✅ |
 

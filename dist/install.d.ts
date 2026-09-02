@@ -21,6 +21,8 @@ export interface InstallOptions {
  */
 export declare function install(opts: InstallOptions): Promise<void>;
 export declare const EXCLUSION_LINE = ".securegit/** -filter -diff -text";
+/** Exported so `verify.ts` (T12) can check for the same shapes on disk. */
+export declare const RESIDUE_SUFFIXES: string[];
 /** The path vim actually gives a swap file: dot-prefixed basename, `.sw?`. */
 export declare function swapPattern(pattern: string): string;
 export interface ProtectOptions {

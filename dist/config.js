@@ -40,6 +40,10 @@ export async function initConfig(repoDir, opts = {}) {
     if (!(await isGitRepo(repoDir))) {
         throw new ConfigError(`securegit: ${repoDir} is not a Git repository (no .git found)`);
     }
+    const padTo = opts.padTo ?? 0;
+    if (!Number.isInteger(padTo) || padTo < 0) {
+        throw new ConfigError(`securegit: padTo must be a non-negative integer, got ${padTo}`);
+    }
     const path = configPath(repoDir);
     try {
         await stat(path);
@@ -54,6 +58,7 @@ export async function initConfig(repoDir, opts = {}) {
         version: 1,
         repoId: generateRepoId(),
         bindPath: opts.bindPath ?? false,
+        padTo,
     };
     await mkdir(join(repoDir, '.securegit'), { recursive: true });
     await writeFile(path, `${JSON.stringify(config, null, 2)}\n`, 'utf8');

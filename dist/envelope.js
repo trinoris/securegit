@@ -14,7 +14,10 @@ export const MAGIC = Buffer.concat([
 export const FORMAT_V1 = 1;
 export const ALG_AES256GCM_CONVERGENT = 1;
 export const FLAG_BIND_PATH = 0x01;
-const FLAGS_KNOWN = FLAG_BIND_PATH;
+/** Content is `[4-byte BE length][real content][zero padding]` — see `padContent`/`unpadContent`. */
+export const FLAG_PADDED = 0x02;
+const FLAGS_KNOWN = FLAG_BIND_PATH | FLAG_PADDED;
+const PAD_LENGTH_PREFIX_LEN = 4;
 const OFF_FORMAT = MAGIC.length;
 const OFF_ALGORITHM = OFF_FORMAT + 1;
 const OFF_FLAGS = OFF_ALGORITHM + 1;
@@ -64,6 +67,31 @@ function buildAad(header, boundPath) {
         return header;
     return Buffer.concat([header, SEP, Buffer.from(boundPath, 'utf8')]);
 }
+/**
+ * Prepends a 4-byte big-endian length, then zero-pads the whole thing up to
+ * the next multiple of `padTo` — the length prefix is what makes the
+ * round-trip exact even when the original content itself ends in zero
+ * bytes, which a "trim trailing zeros" scheme would silently corrupt.
+ */
+function padContent(content, padTo) {
+    const withLength = Buffer.alloc(PAD_LENGTH_PREFIX_LEN + content.length);
+    withLength.writeUInt32BE(content.length, 0);
+    content.copy(withLength, PAD_LENGTH_PREFIX_LEN);
+    const targetLength = Math.ceil(withLength.length / padTo) * padTo;
+    const padded = Buffer.alloc(targetLength); // zero-filled; the length prefix says how much of it is real
+    withLength.copy(padded, 0);
+    return padded;
+}
+function unpadContent(padded) {
+    if (padded.length < PAD_LENGTH_PREFIX_LEN) {
+        throw new EnvelopeError('padded content is truncated: missing length prefix');
+    }
+    const length = padded.readUInt32BE(0);
+    if (PAD_LENGTH_PREFIX_LEN + length > padded.length) {
+        throw new EnvelopeError('padded content is truncated: length prefix exceeds the buffer');
+    }
+    return padded.subarray(PAD_LENGTH_PREFIX_LEN, PAD_LENGTH_PREFIX_LEN + length);
+}
 function checkSize(length, maxBytes) {
     if (length > maxBytes) {
         throw new EnvelopeError(`content is too large: ${length} bytes exceeds the ${maxBytes} byte limit`);
@@ -108,6 +136,7 @@ export function parseEnvelope(buf) {
         format,
         algorithm,
         bindPath: (flags & FLAG_BIND_PATH) !== 0,
+        padded: (flags & FLAG_PADDED) !== 0,
         keyId,
         tag: buf.subarray(headerLength, headerLength + CONTENT_TAG_LEN),
         authTag: buf.subarray(headerLength + CONTENT_TAG_LEN, minimum),
@@ -119,19 +148,21 @@ export function parseEnvelope(buf) {
 export function seal(plaintext, opts) {
     const bindPath = opts.bindPath ?? false;
     const maxBytes = opts.maxBytes ?? DEFAULT_MAX_BYTES;
+    const padTo = opts.padTo ?? 0;
     const keyIdBuf = validateKeyId(opts.keyId);
     checkSize(plaintext.length, maxBytes);
+    const content = padTo > 0 ? padContent(plaintext, padTo) : plaintext;
     const header = Buffer.alloc(HEADER_FIXED_LEN + keyIdBuf.length);
     MAGIC.copy(header, 0);
     header.writeUInt8(FORMAT_V1, OFF_FORMAT);
     header.writeUInt8(ALG_AES256GCM_CONVERGENT, OFF_ALGORITHM);
-    header.writeUInt8(bindPath ? FLAG_BIND_PATH : 0, OFF_FLAGS);
+    header.writeUInt8((bindPath ? FLAG_BIND_PATH : 0) | (padTo > 0 ? FLAG_PADDED : 0), OFF_FLAGS);
     header.writeUInt8(keyIdBuf.length, OFF_KEY_ID_LEN);
     keyIdBuf.copy(header, OFF_KEY_ID);
     const boundPath = bindPath ? normalizePath(opts.path) : null;
-    const tag = contentTag(deriveTagKey(opts.rmk), plaintext, boundPath);
+    const tag = contentTag(deriveTagKey(opts.rmk), content, boundPath);
     const dek = deriveFileKey(opts.rmk, tag, boundPath);
-    const { ciphertext, authTag } = aeadEncrypt(dek, tag.subarray(0, NONCE_LEN), plaintext, buildAad(header, boundPath));
+    const { ciphertext, authTag } = aeadEncrypt(dek, tag.subarray(0, NONCE_LEN), content, buildAad(header, boundPath));
     return Buffer.concat([header, tag, authTag, ciphertext]);
 }
 /**
@@ -143,6 +174,7 @@ export function unseal(envelope, opts) {
     checkSize(header.ciphertext.length, opts.maxBytes ?? DEFAULT_MAX_BYTES);
     const boundPath = header.bindPath ? normalizePath(opts.path) : null;
     const dek = deriveFileKey(opts.rmk, header.tag, boundPath);
-    return aeadDecrypt(dek, header.tag.subarray(0, NONCE_LEN), header.ciphertext, header.authTag, buildAad(envelope.subarray(0, header.headerLength), boundPath));
+    const content = aeadDecrypt(dek, header.tag.subarray(0, NONCE_LEN), header.ciphertext, header.authTag, buildAad(envelope.subarray(0, header.headerLength), boundPath));
+    return header.padded ? unpadContent(content) : content;
 }
 //# sourceMappingURL=envelope.js.map

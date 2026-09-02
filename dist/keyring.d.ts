@@ -42,6 +42,20 @@ export declare function rotateKeyring(file: KeyringFile, providers: KeyProvider[
     file: KeyringFile;
     rmk: Secret;
 }>;
+export interface RecoveredGeneration {
+    generation: number;
+    rmk: Buffer;
+}
+/**
+ * Builds a full keyring from already-known generations — e.g. recovered via
+ * `recovery.ts`'s `importRecovery`. Unlike `createKeyring` (always a fresh
+ * generation 1) or `rotateKeyring` (always exactly one new generation on top
+ * of an existing file), this wraps an arbitrary, already-determined set of
+ * generations for a brand-new provider, which is what makes a machine that
+ * just imported a recovery file "a full holder" — able to rotate, add
+ * recipients, and re-export from here on.
+ */
+export declare function keyringFromRecoveredGenerations(repoId: string, recovered: RecoveredGeneration[], providers: KeyProvider[]): Promise<KeyringFile>;
 export interface UnlockOptions {
     /** Never receives plaintext or key material. Defaults to a no-op. */
     warn?: (message: string) => void;

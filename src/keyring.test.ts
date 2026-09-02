@@ -11,6 +11,7 @@ import {
   parseKeyId,
   createKeyring,
   rotateKeyring,
+  keyringFromRecoveredGenerations,
   unlockKeyring,
   writeKeyringFile,
   readKeyringFile,
@@ -120,6 +121,93 @@ describe('rotateKeyring()', () => {
   it('refuses to rotate with no providers', async () => {
     const { file } = await createKeyring(REPO, [passphraseProvider()]);
     await expect(rotateKeyring(file, [])).rejects.toBeInstanceOf(KeyringError);
+  });
+});
+
+describe('keyringFromRecoveredGenerations()', () => {
+  const RMK1 = Buffer.alloc(32, 0x11);
+  const RMK2 = Buffer.alloc(32, 0x22);
+  const RMK5 = Buffer.alloc(32, 0x55);
+
+  it('builds a keyring holding every given generation', async () => {
+    const file = await keyringFromRecoveredGenerations(
+      REPO,
+      [
+        { generation: 1, rmk: RMK1 },
+        { generation: 2, rmk: RMK2 },
+      ],
+      [passphraseProvider()],
+    );
+    expect(file.repoId).toBe(REPO);
+    expect(file.generations.map((g) => g.generation)).toEqual([1, 2]);
+  });
+
+  it('current is the highest generation, regardless of input order', async () => {
+    const file = await keyringFromRecoveredGenerations(
+      REPO,
+      [
+        { generation: 5, rmk: RMK5 },
+        { generation: 1, rmk: RMK1 },
+      ],
+      [passphraseProvider()],
+    );
+    expect(file.current).toBe(5);
+    expect(file.generations.map((g) => g.generation)).toEqual([1, 5]); // sorted
+  });
+
+  it("records each generation's real fingerprint", async () => {
+    const file = await keyringFromRecoveredGenerations(REPO, [{ generation: 1, rmk: RMK1 }], [
+      passphraseProvider(),
+    ]);
+    expect(file.generations[0]?.fingerprint).toBe(keyFingerprint(RMK1));
+  });
+
+  it('wraps every generation with every configured provider', async () => {
+    const a = new PassphraseFileProvider(() => 'passphrase for provider a!', FAST_COST);
+    const b = new PassphraseFileProvider(() => 'passphrase for provider b!', FAST_COST);
+    Object.defineProperty(b, 'id', { value: 'passphrase-file-b' });
+    const file = await keyringFromRecoveredGenerations(
+      REPO,
+      [
+        { generation: 1, rmk: RMK1 },
+        { generation: 2, rmk: RMK2 },
+      ],
+      [a, b],
+    );
+    for (const gen of file.generations) {
+      expect(gen.wrapped.map((w) => w.provider)).toEqual(['passphrase-file', 'passphrase-file-b']);
+    }
+  });
+
+  it('refuses with no providers', async () => {
+    await expect(
+      keyringFromRecoveredGenerations(REPO, [{ generation: 1, rmk: RMK1 }], []),
+    ).rejects.toBeInstanceOf(KeyringError);
+  });
+
+  it('refuses with no generations', async () => {
+    await expect(
+      keyringFromRecoveredGenerations(REPO, [], [passphraseProvider()]),
+    ).rejects.toBeInstanceOf(KeyringError);
+  });
+
+  it('produces a keyring that unlocks and can itself be rotated further', async () => {
+    const file = await keyringFromRecoveredGenerations(
+      REPO,
+      [
+        { generation: 1, rmk: RMK1 },
+        { generation: 2, rmk: RMK2 },
+      ],
+      [passphraseProvider()],
+    );
+
+    const keys = await unlockKeyring(file, [passphraseProvider()]);
+    expect(keys.current()?.rmk.equals(RMK2)).toBe(true);
+    expect(keys.find(keyIdFor(1, keyFingerprint(RMK1)))?.equals(RMK1)).toBe(true);
+
+    const { file: rotated } = await rotateKeyring(file, [passphraseProvider()]);
+    expect(rotated.current).toBe(3);
+    expect(rotated.generations.map((g) => g.generation)).toEqual([1, 2, 3]);
   });
 });
 

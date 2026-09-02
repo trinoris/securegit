@@ -27,6 +27,8 @@ export interface FilterContext {
     path: string;
     bindPath?: boolean;
     maxBytes?: number;
+    /** `clean` only — `unseal`/`smudge` never need it, the envelope's own flag says whether to unpad. */
+    padTo?: number;
     /** `smudge --strict`: fail instead of passing ciphertext through. */
     strict?: boolean;
     /** Defaults to `console.error`. Never receives plaintext or key material. */

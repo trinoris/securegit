@@ -67,6 +67,7 @@ const IDENTITY_KEYS = [
   'filter.securegit.smudge',
   'filter.securegit.process',
   'diff.securegit.textconv',
+  'merge.securegit.driver',
 ] as const;
 
 /** Every value securegit itself would ever write to an identity key, for any form. */
@@ -76,6 +77,7 @@ function recognizedValues(bin: string): Set<string> {
     `${bin} smudge -- %f`,
     `${bin} filter-process`,
     `${bin} textconv --`,
+    `${bin} merge -- %O %A %B %L %P`,
   ]);
 }
 
@@ -123,6 +125,8 @@ export async function install(opts: InstallOptions): Promise<void> {
   await gitConfigSet(opts.repoDir, 'filter.securegit.required', required ? 'true' : 'false');
   await gitConfigSet(opts.repoDir, 'diff.securegit.textconv', `${bin} textconv --`);
   await gitConfigSet(opts.repoDir, 'diff.securegit.cachetextconv', 'false');
+  await gitConfigSet(opts.repoDir, 'merge.securegit.name', 'securegit encrypted three-way merge');
+  await gitConfigSet(opts.repoDir, 'merge.securegit.driver', `${bin} merge -- %O %A %B %L %P`);
 }
 
 // ---------------------------------------------------------------------------
@@ -132,7 +136,7 @@ export async function install(opts: InstallOptions): Promise<void> {
 export const EXCLUSION_LINE = '.securegit/** -filter -diff -text';
 
 function attributeLine(pattern: string): string {
-  return `${pattern} filter=securegit diff=securegit -text`;
+  return `${pattern} filter=securegit diff=securegit merge=securegit -text`;
 }
 
 async function readLines(path: string): Promise<string[]> {
@@ -163,7 +167,8 @@ async function updateGitattributes(repoDir: string, patterns: string[]): Promise
 // .gitignore residue entries (T12)
 // ---------------------------------------------------------------------------
 
-const RESIDUE_SUFFIXES = ['~', '.orig', '.rej', '.bak', '.save'];
+/** Exported so `verify.ts` (T12) can check for the same shapes on disk. */
+export const RESIDUE_SUFFIXES = ['~', '.orig', '.rej', '.bak', '.save'];
 
 /** The path vim actually gives a swap file: dot-prefixed basename, `.sw?`. */
 export function swapPattern(pattern: string): string {

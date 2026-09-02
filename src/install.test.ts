@@ -41,6 +41,8 @@ const ALL_KEYS = [
   'filter.securegit.required',
   'diff.securegit.textconv',
   'diff.securegit.cachetextconv',
+  'merge.securegit.name',
+  'merge.securegit.driver',
 ];
 
 let dir: string;
@@ -55,7 +57,7 @@ afterEach(async () => {
 });
 
 describe('install()', () => {
-  it('writes the clean/smudge/required/diff configuration', async () => {
+  it('writes the clean/smudge/required/diff/merge configuration', async () => {
     await install({ repoDir: dir });
     expect(await snapshot(dir, ALL_KEYS)).toEqual({
       'filter.securegit.clean': 'securegit clean -- %f',
@@ -64,6 +66,8 @@ describe('install()', () => {
       'filter.securegit.required': 'true',
       'diff.securegit.textconv': 'securegit textconv --',
       'diff.securegit.cachetextconv': 'false',
+      'merge.securegit.name': 'securegit encrypted three-way merge',
+      'merge.securegit.driver': 'securegit merge -- %O %A %B %L %P',
     });
   });
 
@@ -76,6 +80,8 @@ describe('install()', () => {
       'filter.securegit.required': 'true',
       'diff.securegit.textconv': 'securegit textconv --',
       'diff.securegit.cachetextconv': 'false',
+      'merge.securegit.name': 'securegit encrypted three-way merge',
+      'merge.securegit.driver': 'securegit merge -- %O %A %B %L %P',
     });
   });
 
@@ -91,6 +97,9 @@ describe('install()', () => {
     );
     expect(await configGet(dir, 'diff.securegit.textconv')).toBe(
       '/opt/securegit/bin/securegit textconv --',
+    );
+    expect(await configGet(dir, 'merge.securegit.driver')).toBe(
+      '/opt/securegit/bin/securegit merge -- %O %A %B %L %P',
     );
   });
 
@@ -156,6 +165,12 @@ describe('install()', () => {
       await expect(install({ repoDir: dir })).rejects.toBeInstanceOf(InstallError);
     });
 
+    it('refuses to overwrite a foreign merge.securegit.driver', async () => {
+      await git(dir, ['config', '--local', 'merge.securegit.driver', 'some-other-tool merge']);
+      await expect(install({ repoDir: dir })).rejects.toBeInstanceOf(InstallError);
+      expect(await configGet(dir, 'merge.securegit.driver')).toBe('some-other-tool merge');
+    });
+
     it('does not treat its own other-form value as foreign', async () => {
       // A repo already configured for --process is not "foreign" to a
       // plain install — it is the same tool, the other supported form.
@@ -182,12 +197,12 @@ describe('protect()', () => {
   it('creates .gitattributes with the pattern line and the exclusion last', async () => {
     await protect(dir, ['.env']);
     const lines = (await readAttrs()).trimEnd().split('\n');
-    expect(lines).toEqual(['.env filter=securegit diff=securegit -text', EXCLUSION_LINE]);
+    expect(lines).toEqual(['.env filter=securegit diff=securegit merge=securegit -text', EXCLUSION_LINE]);
   });
 
   it('writes the exact documented line format', async () => {
     await protect(dir, ['*.secret']);
-    expect(await readAttrs()).toContain('*.secret filter=securegit diff=securegit -text\n');
+    expect(await readAttrs()).toContain('*.secret filter=securegit diff=securegit merge=securegit -text\n');
   });
 
   it('appends a new pattern to an existing file, exclusion still last', async () => {
@@ -195,8 +210,8 @@ describe('protect()', () => {
     await protect(dir, ['*.secret']);
     const lines = (await readAttrs()).trimEnd().split('\n');
     expect(lines).toEqual([
-      '.env filter=securegit diff=securegit -text',
-      '*.secret filter=securegit diff=securegit -text',
+      '.env filter=securegit diff=securegit merge=securegit -text',
+      '*.secret filter=securegit diff=securegit merge=securegit -text',
       EXCLUSION_LINE,
     ]);
   });
@@ -214,7 +229,7 @@ describe('protect()', () => {
     const content = await readAttrs();
     expect(content).toContain('# managed elsewhere');
     expect(content).toContain('*.png binary');
-    expect(content).toContain('.env filter=securegit diff=securegit -text');
+    expect(content).toContain('.env filter=securegit diff=securegit merge=securegit -text');
   });
 
   it('moves a stray exclusion line back to the end', async () => {
@@ -228,9 +243,9 @@ describe('protect()', () => {
   it('accepts multiple patterns in one call', async () => {
     await protect(dir, ['.env', '*.secret', 'config/production.*']);
     const content = await readAttrs();
-    expect(content).toContain('.env filter=securegit diff=securegit -text');
-    expect(content).toContain('*.secret filter=securegit diff=securegit -text');
-    expect(content).toContain('config/production.* filter=securegit diff=securegit -text');
+    expect(content).toContain('.env filter=securegit diff=securegit merge=securegit -text');
+    expect(content).toContain('*.secret filter=securegit diff=securegit merge=securegit -text');
+    expect(content).toContain('config/production.* filter=securegit diff=securegit merge=securegit -text');
   });
 
   describe('residue .gitignore entries (T12)', () => {

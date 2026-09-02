@@ -10,7 +10,11 @@ on a USB stick.
 This document states what that buys and, more importantly, **what it does not**.
 Every later spec is a consequence of one of the lines below.
 
-**Status: NOT IMPLEMENTED.** Nothing in this package exists yet.
+**Status: IMPLEMENTED.** The boundary this document draws is enforced by
+`src/filter.ts` (the boundary itself), `src/session.ts` and `src/keyring.ts`
+(the key material that must never cross it), proven end to end in
+`src/git.integration.test.ts` — no plaintext byte reaches `.git/objects`,
+push, clone or a mirror.
 
 ## Core Principle
 
@@ -136,7 +140,7 @@ belong in this repository at all.
 | `.git/objects` contains no plaintext after `add`+`commit` | `src/git.integration.test.ts` | `repo-protected/` | ✅ |
 | A bundle of the repo decrypts to nothing without the key | `src/git.integration.test.ts` | `repo-protected/` | 🔲 |
 | Clone by a keyless third party yields ciphertext in the worktree | `src/git.integration.test.ts` | `repo-protected/` | ✅ |
-| Removing the `.gitattributes` line is reported by `verify` | `src/verify.test.ts` | `attributes/` | 🔲 |
+| Removing the `.gitattributes` line is reported by `verify` | `src/verify.test.ts` | `attributes/` | ✅ |
 | Session cache and keyring are never written inside the repo | `src/config.test.ts` | — | 🔲 |
 
 ## Relationship to Other Specs

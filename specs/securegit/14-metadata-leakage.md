@@ -6,8 +6,15 @@ Everything an observer holding the encrypted repository can still learn. This is
 the residue [01](01-threat-model.md) declared out of scope, enumerated, because
 "out of scope" is only an acceptable answer if the reader knows what it covers.
 
-**Status: INHERENT.** Most of this cannot be fixed within Git's object model.
-The parts that can be are marked.
+**Status: INHERENT, except M2, which is IMPLEMENTED.** Most of this cannot
+be fixed within Git's object model. The parts that can be are marked.
+`padTo` (M2's mitigation) is built: `src/envelope.ts`'s `seal`/`unseal`
+(a length-prefixed pad/unpad scheme behind a new `flags` bit),
+`src/config.ts`'s `RepoConfig.padTo` (set only at `init`, like `bindPath`),
+and every place that calls `seal` — `clean`, `reencrypt`, `merge`,
+`filter-process`, `encrypt` — now threads it through. See "What this pass
+actually built" below. `status` reporting which of M1–M12 apply
+(`securegit status`'s own output) is not built.
 
 ## Core Principle
 
@@ -102,6 +109,17 @@ Padding is deliberately **not** the default. It buys a coarse bucket, not
 anonymity, and a user who enables it should have decided that sizes are part of
 their threat model rather than inheriting it from a default.
 
+As built, `padTo` is set only via `securegit init --pad-to <n>` — there is
+no command to change it on an already-initialised repository, the same
+constraint `bindPath` already has and for the same reason: `config.ts` has
+no "update this field in place" primitive for either. This isn't a hole
+specific to padding — changing it later is exactly what `reencrypt`
+(already built, [09](09-rotation-recovery.md)) is for: re-run it after
+editing `padTo` by hand in `.securegit/config.json`, and every protected
+file still tracked gets re-sealed under the new value, since `reencrypt`
+compares against a freshly-computed `clean()` output and stages whatever
+differs.
+
 ## M8: equality, and what it costs
 
 The one leak introduced by a *choice* in this design rather than by Git's
@@ -131,18 +149,62 @@ None of that required breaking any cryptography. If that profile is itself
 unacceptable, the requirement is not "encrypt the files" — it is "do not put
 this in a repository the adversary can read", and no filter can deliver it.
 
+## What this pass actually built
+
+`src/envelope.ts`: `FLAG_PADDED` (`0x02`, the second flag bit — `bindPath`
+already used bit 0), `padContent`/`unpadContent`, and `padTo?: number` on
+`SealOptions`. `src/config.ts`: `RepoConfig.padTo` (always present, `0`
+meaning disabled — same shape as `bindPath: boolean`, never optional) and
+validated in `initConfig` (a non-negative integer, or refused). Every
+caller that seals content — `clean` (`filter.ts`), `merge` (`merge.ts`),
+`FilterProcessServer` (`process.ts`), and `encrypt`/`reencrypt`
+(`cli.ts`) — now threads `padTo` through from `RepoConfig`.
+`unseal`/`smudge`/`decrypt` need no such threading: the padded/unpadded
+state travels with the envelope itself, in the flag bit.
+
+- **Padding is applied to the *whole* pad-then-seal pipeline, not
+  layered on top of an already-complete `seal()`.** The content tag, the
+  file key, and the AEAD ciphertext are all derived from the padded buffer,
+  not the original content — `seal(plaintext, {padTo})` is exactly
+  `seal(padContent(plaintext, padTo), {…, flags: FLAG_PADDED})` internally.
+  This keeps convergent encryption's guarantee intact: identical plaintext
+  and `padTo` still produce identical ciphertext, since padding is a pure
+  function of both.
+- **The length prefix, not a "trim trailing zero bytes" heuristic, is what
+  makes the round-trip exact.** Real content that itself ends in NUL bytes
+  — not contrived, e.g. a fixed-width binary record format — would be
+  silently truncated by the latter; the spec's own test case calls this out
+  explicitly, and the length-prefixed design was chosen for exactly this
+  reason rather than discovered as a bug afterward.
+- **`padTo` is set only via `securegit init --pad-to <n>`, immutable after
+  — matching `bindPath`'s existing constraint, not a new one invented for
+  padding.** `config.ts` has no "update a field in an already-initialised
+  repository" primitive for either value; building one is out of scope
+  here, same as it was for `key rotate --bind-path` (refused, not
+  implemented — [09](09-rotation-recovery.md)). `reencrypt` is the existing
+  tool for applying a `padTo` changed by hand in `config.json` to every
+  currently-tracked protected file, exactly as it already is for a key
+  rotation.
+- **Proven against a real commit, not just `envelope.ts`'s own injected
+  buffers.** A new `git.integration.test.ts` block runs `init --pad-to 256`,
+  commits a 3-byte file, and checks the committed blob is well over 256
+  bytes (padding actually inflated the ciphertext, not just set a flag) while
+  the checked-out worktree file is still the exact original 3 bytes.
+
 ## Test Cases
 
 | Test | Test File | Fixture | Status |
 |------|-----------|---------|--------|
 | Ciphertext length equals plaintext length plus `63 + keyIdLen` | `src/envelope.test.ts` | — | ✅ |
-| Padding rounds to a multiple of `padTo` | `src/envelope.test.ts` | — | 🔲 |
-| Padded content round-trips exactly, including trailing NULs in the original | `src/envelope.test.ts` | — | 🔲 |
-| Padding is deterministic ([03](03-determinism.md)) | `src/crypto.test.ts` | — | 🔲 |
-| Files under `padTo` all yield the same ciphertext length | `src/envelope.test.ts` | — | 🔲 |
-| A file above `padTo` rounds to the next multiple | `src/envelope.test.ts` | — | 🔲 |
-| `padTo` change is refused without a rotation | `src/config.test.ts` | — | 🔲 |
-| Padding disabled by default | `src/config.test.ts` | — | 🔲 |
+| Padding rounds to a multiple of `padTo` | `src/envelope.test.ts` | — | ✅ |
+| Padded content round-trips exactly, including trailing NULs in the original | `src/envelope.test.ts` | — | ✅ |
+| Padding is deterministic ([03](03-determinism.md)) | `src/envelope.test.ts` | — | ✅ |
+| Files under `padTo` all yield the same ciphertext length | `src/envelope.test.ts` | — | ✅ |
+| A file above `padTo` rounds to the next multiple | `src/envelope.test.ts` | — | ✅ |
+| Padding disabled by default (envelope, and `RepoConfig.padTo`) | `src/envelope.test.ts`, `src/config.test.ts` | — | ✅ |
+| `init --pad-to` round-trips through a real commit, larger blob, exact checkout | `src/git.integration.test.ts` | — | ✅ |
+| `clean`/`smudge`/`merge`/`filter-process` all apply the repository's `padTo` | `src/filter.test.ts`, `src/merge.test.ts`, `src/process.test.ts`, `src/cli.test.ts` | — | ✅ |
+| `padTo` change is refused without a rotation | `src/config.test.ts` | — | 🔲 (there is no command to change `padTo` post-`init` at all — same as `bindPath` — so there is nothing to "refuse" via the CLI; a hand-edit of `config.json` bypasses any such check by construction) |
 | `status` reports which of M1–M12 apply to this repository | `src/cli.test.ts` | — | 🔲 |
 
 ## Relationship to Other Specs

@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { randomBytes } from 'node:crypto';
 import {
-  MAGIC, FORMAT_V1, ALG_AES256GCM_CONVERGENT, FLAG_BIND_PATH,
+  MAGIC, FORMAT_V1, ALG_AES256GCM_CONVERGENT, FLAG_BIND_PATH, FLAG_PADDED,
   HEADER_FIXED_LEN, OVERHEAD_MIN, DEFAULT_MAX_BYTES,
   EnvelopeError,
   looksLikeEnvelope, parseEnvelope, seal, unseal,
@@ -138,6 +138,66 @@ describe('path binding', () => {
   });
 });
 
+describe('padding', () => {
+  it('is disabled by default — ciphertext length is unaffected, no flag set', () => {
+    const withoutOpt = seal(PT, { rmk: RMK, keyId: KEY_ID, path: PATH });
+    const withZero = seal(PT, { rmk: RMK, keyId: KEY_ID, path: PATH, padTo: 0 });
+    expect(withoutOpt.length).toBe(withZero.length);
+    expect(parseEnvelope(withoutOpt).padded).toBe(false);
+    expect(FLAG_PADDED).toBe(0x02);
+  });
+
+  it('round-trips exactly and sets the padded flag when padTo is used', () => {
+    const out = seal(PT, { rmk: RMK, keyId: KEY_ID, path: PATH, padTo: 64 });
+    expect(parseEnvelope(out).padded).toBe(true);
+    expect(unseal(out, { rmk: RMK, path: PATH }).equals(PT)).toBe(true);
+  });
+
+  it('round-trips exactly including trailing NULs in the original content', () => {
+    // A naive "trim trailing zero bytes" unpad would corrupt this; the
+    // length prefix this scheme uses instead cannot.
+    const withTrailingNuls = Buffer.concat([PT, Buffer.alloc(5)]);
+    const out = seal(withTrailingNuls, { rmk: RMK, keyId: KEY_ID, path: PATH, padTo: 64 });
+    const decrypted = unseal(out, { rmk: RMK, path: PATH });
+    expect(decrypted.length).toBe(withTrailingNuls.length);
+    expect(decrypted.equals(withTrailingNuls)).toBe(true);
+  });
+
+  it('files under padTo all yield the same ciphertext length', () => {
+    const small = Buffer.from('x');
+    const medium = Buffer.from('x'.repeat(100));
+    const a = seal(small, { rmk: RMK, keyId: KEY_ID, path: PATH, padTo: 4096 });
+    const b = seal(medium, { rmk: RMK, keyId: KEY_ID, path: PATH, padTo: 4096 });
+    expect(a.length).toBe(b.length);
+  });
+
+  it('a file above padTo rounds up to the next multiple', () => {
+    const overOneBucket = Buffer.alloc(4100, 0x41);
+    const out = seal(overOneBucket, { rmk: RMK, keyId: KEY_ID, path: PATH, padTo: 4096 });
+    expect(unseal(out, { rmk: RMK, path: PATH }).equals(overOneBucket)).toBe(true);
+
+    const withinOneBucket = seal(Buffer.from('x'), { rmk: RMK, keyId: KEY_ID, path: PATH, padTo: 4096 });
+    expect(out.length).toBeGreaterThan(withinOneBucket.length);
+  });
+
+  it('is deterministic: same plaintext and padTo always produce the same ciphertext', () => {
+    const a = seal(PT, { rmk: RMK, keyId: KEY_ID, path: PATH, padTo: 64 });
+    const b = seal(PT, { rmk: RMK, keyId: KEY_ID, path: PATH, padTo: 64 });
+    expect(a.equals(b)).toBe(true);
+  });
+
+  it('a different padTo for the same plaintext yields a different ciphertext', () => {
+    const a = seal(PT, { rmk: RMK, keyId: KEY_ID, path: PATH, padTo: 64 });
+    const b = seal(PT, { rmk: RMK, keyId: KEY_ID, path: PATH, padTo: 128 });
+    expect(a.equals(b)).toBe(false);
+  });
+
+  it('a bit flip anywhere in a padded envelope still fails authentication', () => {
+    const out = seal(PT, { rmk: RMK, keyId: KEY_ID, path: PATH, padTo: 64 });
+    expect(() => unseal(flipBit(out, out.length - 1), { rmk: RMK, path: PATH })).toThrow();
+  });
+});
+
 describe('looksLikeEnvelope()', () => {
   it('recognises the magic', () => {
     expect(looksLikeEnvelope(sealed())).toBe(true);
@@ -196,8 +256,9 @@ describe('parseEnvelope()', () => {
   });
 
   it('rejects a set reserved flag bit', () => {
+    // 0x04 — not FLAG_BIND_PATH (0x01) or FLAG_PADDED (0x02), still reserved.
     const bad = Buffer.from(sealed());
-    bad.writeUInt8(0x02, 13);
+    bad.writeUInt8(0x04, 13);
     expect(() => parseEnvelope(bad)).toThrow(/reserved/i);
   });
 

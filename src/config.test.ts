@@ -51,16 +51,30 @@ describe('generateRepoId()', () => {
 });
 
 describe('initConfig()', () => {
-  it('creates config.json with a generated repoId and bindPath false by default', async () => {
+  it('creates config.json with a generated repoId, bindPath false and padTo 0 by default', async () => {
     const config = await initConfig(dir);
     expect(config.version).toBe(1);
     expect(config.repoId).toMatch(/^[0-9a-f]{32}$/);
     expect(config.bindPath).toBe(false);
+    expect(config.padTo).toBe(0);
   });
 
   it('honours bindPath: true', async () => {
     const config = await initConfig(dir, { bindPath: true });
     expect(config.bindPath).toBe(true);
+  });
+
+  it('honours padTo', async () => {
+    const config = await initConfig(dir, { padTo: 4096 });
+    expect(config.padTo).toBe(4096);
+  });
+
+  it('rejects a negative padTo', async () => {
+    await expect(initConfig(dir, { padTo: -1 })).rejects.toThrow(ConfigError);
+  });
+
+  it('rejects a non-integer padTo', async () => {
+    await expect(initConfig(dir, { padTo: 1.5 })).rejects.toThrow(ConfigError);
   });
 
   it('writes exactly what readConfig() then reads back', async () => {

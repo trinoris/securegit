@@ -133,6 +133,47 @@ export async function rotateKeyring(
   return { file: next, rmk };
 }
 
+export interface RecoveredGeneration {
+  generation: number;
+  rmk: Buffer;
+}
+
+/**
+ * Builds a full keyring from already-known generations — e.g. recovered via
+ * `recovery.ts`'s `importRecovery`. Unlike `createKeyring` (always a fresh
+ * generation 1) or `rotateKeyring` (always exactly one new generation on top
+ * of an existing file), this wraps an arbitrary, already-determined set of
+ * generations for a brand-new provider, which is what makes a machine that
+ * just imported a recovery file "a full holder" — able to rotate, add
+ * recipients, and re-export from here on.
+ */
+export async function keyringFromRecoveredGenerations(
+  repoId: string,
+  recovered: RecoveredGeneration[],
+  providers: KeyProvider[],
+): Promise<KeyringFile> {
+  requireProviders(providers);
+  if (recovered.length === 0) {
+    throw new KeyringError('no generations to build a keyring from');
+  }
+
+  const generations: KeyringGeneration[] = [];
+  let current = 0;
+  for (const { generation, rmk } of recovered) {
+    const wrapped = await wrapForEveryProvider(rmk, repoId, generation, providers);
+    generations.push({
+      generation,
+      fingerprint: keyFingerprint(rmk),
+      createdAt: new Date().toISOString(),
+      wrapped,
+    });
+    if (generation > current) current = generation;
+  }
+  generations.sort((a, b) => a.generation - b.generation);
+
+  return { version: 1, repoId, current, generations };
+}
+
 export interface UnlockOptions {
   /** Never receives plaintext or key material. Defaults to a no-op. */
   warn?: (message: string) => void;

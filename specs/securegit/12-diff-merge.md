@@ -7,15 +7,17 @@ restores the two that matter — diff and merge — and is explicit about the on
 that cannot be restored, because a user who discovers those on their own
 concludes the tool is broken.
 
-**Status: MOSTLY IMPLEMENTED.** Diff (`textconv`) has been implemented since
+**Status: IMPLEMENTED.** Diff (`textconv`) has been implemented since
 [filter.ts](02-git-integration.md) landed. `src/merge.ts` implements the
-merge driver itself, and it is wired into `src/cli.ts` as
+merge driver itself, wired into `src/cli.ts` as
 `securegit merge -- <base> <ours> <theirs> <markerSize> <path>`
-([10](10-cli-contract.md)). What's still open: the real-`git` end-to-end
-proof — a genuine conflicted merge driven through `git merge` itself, with
-`.gitattributes`' `merge=securegit` actually routing to the driver, not just
-`cli.test.ts` calling `securegit merge` directly. See "What this pass
-actually built" below.
+([10](10-cli-contract.md)), and `install`/`protect` write the
+`merge.securegit.*` config and `merge=securegit` attribute that route a real
+`git merge` to it. Proven end to end against a real `git merge` in
+`src/git.integration.test.ts`: a non-overlapping merge resolves cleanly with
+ciphertext committed and plaintext in the worktree, and a real conflict
+leaves plaintext markers in the worktree and exits nonzero. See "What this
+pass actually built" below.
 
 ## Core Principle
 
@@ -32,7 +34,7 @@ actually built" below.
 ```
 
 ```gitattributes
-config/production.*  filter=securegit diff=securegit -text
+config/production.*  filter=securegit diff=securegit merge=securegit -text
 ```
 
 `textconv` receives a *path to a temporary file* holding the blob and prints the
@@ -176,6 +178,21 @@ exit 0/1.
   requirement needs no extra step. Cleanup is a single `finally` around every
   temp-file-scoped operation, so any failure after the directory is created —
   not only the ones anticipated here — still removes it.
+- **`install`/`protect` route a real `git merge` to the driver.** `install`
+  now writes `merge.securegit.name` and `merge.securegit.driver`, and
+  `protect` writes `merge=securegit` into every attribute line alongside
+  `filter=securegit diff=securegit`. `merge.securegit.driver` joined
+  `IDENTITY_KEYS` in `install.ts`, so the same T10 foreign-config refusal
+  ([16](16-adversarial-integrity.md)) that protects `clean`/`smudge`/`textconv`
+  now protects the merge driver too — a repository with a foreign
+  `merge.securegit.driver` already configured is refused the same way.
+- **The real-`git` proof needed multi-line fixture content, not the
+  single-line JSON used everywhere else in `git.integration.test.ts`.**
+  Two edits on adjacent lines conflict under `git merge-file` even when they
+  touch different fields (see the merge.ts bullet above); the merge tests
+  use throwaway branches off `main`, forcibly deleted afterward, so they
+  don't leave state behind for the clone tests that run after them in the
+  same suite.
 
 ## Test Cases
 
@@ -187,16 +204,18 @@ exit 0/1.
 | `textconv` while locked prints the placeholder and exits 0 | `src/filter.test.ts` | — | ✅ |
 | `textconv` never writes to the object database | `src/git.integration.test.ts` | `repo-protected/` | 🔲 |
 | `install` sets `cachetextconv = false` | `src/install.test.ts` | — | ✅ |
+| `install` writes `merge.securegit.name`/`.driver`, `protect` writes `merge=securegit` | `src/install.test.ts` | — | ✅ |
+| `install` refuses to overwrite a foreign `merge.securegit.driver` (T10) | `src/install.test.ts` | — | ✅ |
 | `verify` reports `cachetextconv = true` as an error | `src/verify.test.ts` | — | ✅ |
-| `verify --history` finds a textconv notes ref | `src/verify.test.ts` | `legacy-plaintext/` | 🔲 |
+| `verify --history` finds a textconv notes ref | `src/verify.test.ts` | — | ✅ |
 | Merge driver resolves a non-overlapping three-way merge cleanly | `src/merge.test.ts` | — | ✅ |
 | Merge driver writes ciphertext to `%A` | `src/merge.test.ts` | — | ✅ |
-| Conflicted merge exits 1 and the worktree shows plaintext markers | `src/git.integration.test.ts` | `repo-protected/` | 🔲 |
+| Conflicted merge exits 1 and the worktree shows plaintext markers | `src/git.integration.test.ts` | `repo-protected/` | ✅ |
 | Merge driver handles a plaintext ancestor | `src/merge.test.ts` | — | ✅ |
 | Merge driver handles a plaintext side | `src/merge.test.ts` | — | ✅ |
 | Merge driver removes its temporary files on the error path | `src/merge.test.ts` | — | ✅ |
 | Merge driver fails closed rather than writing plaintext to `%A` | `src/merge.test.ts` | — | ✅ |
-| Merged result decrypts to the expected plaintext | `src/git.integration.test.ts` | `repo-protected/` | 🔲 |
+| Merged result decrypts to the expected plaintext | `src/git.integration.test.ts` | `repo-protected/` | ✅ |
 
 ## Relationship to Other Specs
 

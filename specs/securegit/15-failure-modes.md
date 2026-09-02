@@ -9,11 +9,19 @@ message is the useful part.
 
 **Status: MOSTLY VERIFIED.** Every message this package controls (F1/F9, F5,
 F6, F18) is checked in `src/failure.test.ts` for the what/where/action
-discipline below; F11/F19 in `src/keyring.test.ts`; F2/F4/F8/F16 in
+discipline below; F11/F19 in `src/keyring.test.ts`; F2/F4/F8/F16/F21 in
 `src/git.integration.test.ts` (real `git`, since they're about what Git does,
-not about a message). What's not covered: F3/F17 are Git's own message, not
-ours; F10/F13/F20 need features not built yet (`filter-process`, `key
-rotate`, a Node-version floor check); F12/F14/F15 have no code path to test.
+not about a message — F21 reuses F1's exact message, discovered while
+building spec 08's real-clone join-flow proof). F21's own test was itself
+flaky for the same reason F16 exists — see "F21 is the same optimization
+again" below — fixed once diagnosed, not by changing what `pull` guarantees.
+What's not covered: F3/F17 are Git's own message, not ours; F10 (`filter-process`
+crashes mid-run) has no test yet, though `filter-process` itself is now built
+([11](11-filter-process.md)) — this row predates that and is stale in saying
+the feature doesn't exist, only the test for this specific crash-mid-run
+case; F20 needs a Node-version floor check, not built; F12/F14/F15 have no
+code path to test; F13 needs a real concurrent-process race (`key rotate`
+itself is wired now — see [09](09-rotation-recovery.md)).
 
 ## Core Principle
 
@@ -45,6 +53,7 @@ rotate`, a Node-version floor check); F12/F14/F15 have no code path to test.
 | F18 | `core.autocrlf=true`, `-text` missing | ciphertext is CRLF-mangled on the way in or out | F6 on the next checkout | add `-text` ([02](02-git-integration.md)), re-commit the file from a good copy |
 | F19 | Repository moved, `repoId` mismatch | wrapped keys fail their AAD check | "this keyring belongs to repository `4f9a…`, this repository is `7c02…`" | use the right keyring, or `import-recovery` |
 | F20 | Node version below the floor | crypto primitives missing | a startup error naming the required version | upgrade Node |
+| F21 | Locked keyring, `git pull` | `git pull`'s merge can run `clean` on a tracked path even one the incoming change never touches, *when Git's own stat-cache doesn't skip it* (see "F21 is the same optimization again" below) — `required` then aborts the pull | "repository is locked; run `securegit unlock`", but the pull that would have delivered the thing needed to unlock (e.g. a new recipient file) never lands | `securegit unlock` if a keyring already exists; if not (a brand-new recipient's first pull), `install` must not have run yet — see [02](02-git-integration.md) and [08](08-multi-recipient.md) |
 
 ## Why the F2/F4/F8 recovery is not `checkout --force`
 
@@ -92,6 +101,35 @@ Git re-evaluates the path, calls `clean`, and it fails closed exactly like
 F1. This is provable and is exactly what the F16 integration test does:
 locked, re-add of a byte-identical worktree file succeeds silently; locked,
 re-add after touching the same file fails with the F1 message.
+
+## F21 is the same optimization again, seen from `merge`
+
+F21's own integration test — proving a locked `git pull` fails closed — was
+flaky, found by repeated runs rather than by reading the spec: roughly half
+the time, `git pull` (a trivial fast-forward whose only actual change is a
+*new*, unrelated file) silently succeeded instead of hitting the lock check
+at all, with no test-visible cause. `GIT_TRACE=1` on a failing run showed
+why: `git merge -q FETCH_HEAD` never invoked our filter for the protected
+path in the first place. This is F16's exact mechanism (a stat-cache/
+tree-diff short-circuit that skips a path Git doesn't believe changed),
+manifesting inside `merge`'s fast-forward path instead of `add`'s — and
+whether Git trusts the cached entry for `PROTECTED_PATH` depends on how much
+real wall-clock time separates the prior test's `checkout` (which sets a
+fresh index stat entry) from this test's own `pull`, not on anything this
+package controls.
+
+The claim in the table above — "even ones the incoming change never
+touches" — is therefore not an unconditional guarantee; it is what happens
+*when Git actually re-verifies the path*, which a sufficiently fast pull
+right after a checkout is not guaranteed to do. The fix is F16's own
+technique, applied to `merge`: force a future mtime on `PROTECTED_PATH`
+(`utimes`) before locking and pulling, so Git can no longer trust the cached
+entry and must re-read the file — which is what makes the filter, and
+therefore the lock check, actually run. Six consecutive clean runs (versus
+roughly 50% failures beforehand) confirm the fix; the underlying git
+mechanism itself is unaffected — it's the test's setup that now reliably
+reaches the code path it means to exercise, not a change to what `pull`
+guarantees on its own.
 
 ## F14 is the real risk
 
@@ -157,17 +195,20 @@ Messages go to stderr in every case ([10](10-cli-contract.md)), including
 | F6: a flipped ciphertext byte reports the path | `src/failure.test.ts` | — | ✅ |
 | F8: a keyless-clone worktree is repaired by `rm --cached`+`checkout HEAD` | `src/git.integration.test.ts` | `repo-protected/` | ✅ |
 | F11: keyring write is atomic; a simulated failure leaves the old file | `src/keyring.test.ts` | — | ✅ |
-| F13: rotation during an add fails the add rather than mixing generations | `src/git.integration.test.ts` | `repo-protected/` | 🔲 (blocked: `key rotate` has no CLI wiring yet) |
+| F13: rotation during an add fails the add rather than mixing generations | `src/git.integration.test.ts` | `repo-protected/` | 🔲 (`key rotate` is wired now — this needs a real concurrent-process race, not built) |
 | F16: keyless commit of an unmodified protected file is a no-op, and the mechanism is Git's stat-cache, not `clean`'s passthrough | `src/git.integration.test.ts` | `repo-protected/` | ✅ |
 | F18: CRLF-mangled envelope reports corruption, not a wrong key | `src/failure.test.ts` | — | ✅ |
 | F19: foreign keyring is rejected by `repoId`, with both ids named | `src/keyring.test.ts` | — | ✅ |
+| F21: a locked repository with the filter attached cannot `git pull` | `src/git.integration.test.ts` | — | ✅ |
 | `status` warns while there is only one recovery path | `src/cli.test.ts` | — | 🔲 (blocked: recovery export is spec 09, not built) |
-| `verify` reports single-recipient, no-export as a finding | `src/verify.test.ts` | — | 🔲 (blocked: recipients/recovery export are specs 08/09, not built) |
+| `verify` reports single-recipient, no-export as a finding | `src/verify.test.ts` | — | 🔲 (blocked: recovery export is spec 09, not built — recipients themselves are spec 08, now built) |
 | No failure path writes plaintext to the object database | `src/git.integration.test.ts` | `repo-protected/` | 🔲 |
 
 ## Relationship to Other Specs
 
+- [02](02-git-integration.md) — the general statement of the mechanism behind F21
 - [04](04-envelope-format.md) — passthrough, behind F16
-- [07](07-unlock-session.md) — the asymmetry, behind F1 and F2
+- [07](07-unlock-session.md) — the asymmetry, behind F1, F2 and F21
+- [08](08-multi-recipient.md) — the join flow F21 was found while proving
 - [09](09-rotation-recovery.md) — the recovery path that prevents F14
 - [13](13-verify.md) — how F7 is found at all
