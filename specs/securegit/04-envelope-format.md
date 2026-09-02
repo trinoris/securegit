@@ -10,6 +10,17 @@ readable by version 9.
 `looksLikeEnvelope` — matches this document exactly; format-breaking
 deviations found while building it were corrected here, not there (there is
 no declared-length field, for one — see the edge-case table below).
+`tests/fixtures/envelopes/v1-basic.bin` and `v1-bindpath.bin` are two
+envelopes sealed once and committed, asserted in `src/vectors.test.ts` to
+still decrypt to their frozen plaintext under their frozen key — the "must
+decrypt forever" promise, checked rather than assumed. The tampered-envelope
+fixtures this file's own 00-test-plan.md fixture catalogue lists
+(`v1-truncated.bin`, `v1-flipped.bin`, and the rest) were deliberately not
+built as separate committed files: every one of those rows is already
+covered in `src/envelope.test.ts` by tampering a freshly-sealed envelope
+in memory, which is a test about today's parser rejecting corruption, not
+about compatibility with something committed in the past — a static fixture
+would add a file without adding signal.
 
 ## Core Principle
 
@@ -184,7 +195,7 @@ did not already have.
 | Test | Test File | Fixture | Status |
 |------|-----------|---------|--------|
 | Encode/decode round-trips for 0, 1, 15, 4095, 4096, 4097, 64 KiB inputs | `src/envelope.test.ts` | — | ✅ |
-| Committed v1 envelopes still decrypt | `src/vectors.test.ts` | `envelopes/v1-*.bin` | 🔲 |
+| Committed v1 envelopes still decrypt | `src/vectors.test.ts` | `envelopes/v1-*.bin` | ✅ |
 | Unknown `format` errors rather than passing through | `src/envelope.test.ts` | — | ✅ |
 | Unknown `algorithm` errors on parse, guarding both directions | `src/envelope.test.ts` | — | ✅ |
 | A set reserved flag bit errors | `src/envelope.test.ts` | — | ✅ |

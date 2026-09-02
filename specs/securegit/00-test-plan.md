@@ -62,6 +62,13 @@ vectors are what make [03](03-determinism.md)'s cross-machine, cross-version
 promise checkable rather than aspirational. They are generated once, by hand,
 reviewed, and never regenerated.
 
+**Built:** `tests/fixtures/vectors/v1.json`, asserted in `src/vectors.test.ts`.
+Each case also carries `keyId` (needed by `seal()`'s options but not part of
+this sketch), and the file has one extra top-level `hkdf` block — a fixed
+key/path/plaintext with the `deriveTagKey`/`contentTag`/`deriveFileKey`
+outputs pinned as hex, closing [05](05-key-hierarchy.md)'s "HKDF labels
+match the committed vectors" row independently of the envelope-level cases.
+
 ### Content — `blobs/`
 
 | Fixture | What it is for |
@@ -89,6 +96,15 @@ reviewed, and never regenerated.
 | `v1-unknown-algorithm.bin` | `algorithm = 0x7f` |
 | `v1-reserved-flag.bin` | a reserved flag bit set |
 | `v1-unknown-keyid.bin` | a generation not in any test keyring |
+
+**Built:** `v1-basic.bin` and `v1-bindpath.bin` only, asserted in
+`src/vectors.test.ts`. The seven tampered/malformed variants above are
+deliberately not committed as separate files — `src/envelope.test.ts` covers
+that exact ground already, by tampering a freshly-`seal()`ed envelope in
+memory per test. Those are tests of the parser rejecting corruption *today*;
+a static fixture would be meaningful only if the past mattered for that
+question, and for corruption detection it doesn't the way it does for
+"must decrypt forever." See [04](04-envelope-format.md)'s status note.
 
 ### Identities — `identities/`
 
@@ -390,22 +406,112 @@ actually vary. Wired into `status --json`'s `metadata` field; the
 human-readable form gets one pointer line rather than twelve mostly-static
 ones repeated on every call.
 
-567 unit tests, all green; 25 integration tests, all green. Everything from
-the original build order (specs/securegit/00-test-plan.md's own Phase
-1–3 steps, plus `verify --history`/`--access`/`--json`, padding, and `status`
-M1–M12) is now implemented; what remains is the genuinely inherent parts of
-metadata leakage that no filter can fix. The package is TypeScript
-(`src/` → `dist/`, NodeNext, `strict` plus `noUncheckedIndexedAccess` and
-`exactOptionalPropertyTypes`), matching `@trinoris/decision-core`. Unit
+Everything from the original build order (this file's own Phase 1–3 steps,
+plus `verify --history`/`--access`/`--json`, padding, and `status` M1–M12)
+is implemented. Work since has moved to closing the backlog of
+test-coverage and small-feature rows the specs still list open — see each
+spec's own "What this pass actually built" section for detail as they land.
+First: the single-recovery-path advisory
+([09](09-rotation-recovery.md)/[13](13-verify.md)/[15](15-failure-modes.md))
+— `recoveryPathStatus()` in `verify.ts` (a cheap, session-free read: the
+local keyring's provider slot for the current generation, plus every
+recipient covering it, plus the recovery log), shared by `verify()`'s new
+`'recovery'` finding kind and `securegit status`'s own warning line. A solo
+repository — the default state of every freshly `init`ed one in this test
+suite — has exactly one path and warns by default; existing `verify()`
+tests that expected `findings: []` were updated to expect this finding
+once it landed, not weakened to hide it.
+
+`key rotate`'s recipient-count confirmation ([16](16-adversarial-integrity.md),
+T5) is next: recipient files are read once in `cmdKeyRotate`, right after
+the locked check, and the same in-memory list both drives a mandatory
+`--confirm-recipients <n>` gate (printing every current recipient's
+fingerprint and label; refusing on a missing or mismatched count) and,
+once confirmed, is what actually gets rewrapped — closing the window
+between "here's who this affects" and "here's who it affected." Every
+existing `key rotate` call in `cli.test.ts` needed `--confirm-recipients`
+added once this landed, matching the actual recipient count each test sets
+up.
+
+`verify --access` naming the commit that added each recipient
+([16](16-adversarial-integrity.md), T5) is next: `AccessRecipient` gained
+`addedCommit: string | null` in `accessReport()`, resolved via `git log
+--diff-filter=A --format=%h -- <path>` — the one field in that report that
+spawns `git`, everything else there being a plain filesystem read. The
+*oldest* add (the last line of `git log`'s newest-first output), correct
+even across a removed-then-re-added recipient; `null` for a file never
+committed or a repository with no commits yet, not an error. Surfaced in
+both `verify --access`'s human-readable form and `--json`.
+
+`--repo <path>` ([10](10-cli-contract.md)) is next: `runCli` parses and
+strips it from `argv` once, before dispatch, reassigning its own `io`
+parameter to a derived object with `cwd` resolved (`node:path`'s
+`resolve`) and the flag removed, rather than threading an override through
+the roughly 30 places `cli.ts` reads `io.cwd` directly. Every existing
+command case picks it up for free. Works before or after the command name;
+missing its path argument exits 4.
+
+`unprotect <pattern>…` ([02](02-git-integration.md)) is next: `protect`'s
+counterpart, removing patterns from `.gitattributes` only.
+`.gitignore`'s residue entries stay untouched (harmless once unprotected,
+and removing them could unhide files a user still wants ignored for
+unrelated reasons), and it's forward-only exactly like key rotation: a
+blob already committed as ciphertext stays ciphertext until the file is
+actually edited and re-added. A pattern that was never protected, or a
+call before `.gitattributes` exists at all, is a silent no-op — the file
+is left exactly as it was, not written unconditionally.
+
+Known-answer vectors ([03](03-determinism.md), [04](04-envelope-format.md),
+[05](05-key-hierarchy.md)) are next: `src/vectors.test.ts` plus two
+committed fixtures. `tests/fixtures/vectors/v1.json` freezes six
+`seal()`/`unseal()` cases (empty, one byte, 4095 bytes, a UTF-8 BOM, CRLF
+content, `bindPath`) as hex, generated once from the implementation as it
+stands today, and pins the `securegit/tag/v1` / `securegit/dek/v1` HKDF
+labels directly via a `hkdf` block computed the same way — so a rename of
+either label is a test failure here even though it would also,
+indirectly, break the envelope vectors. `tests/fixtures/envelopes/`
+holds two committed envelopes (`v1-basic.bin`, `v1-bindpath.bin`) that must
+keep decrypting under their frozen key forever; the tampered-envelope
+fixtures this file's own catalogue below used to list are deliberately not
+built as separate files, since `envelope.test.ts` already covers that
+ground by tampering a freshly-sealed envelope in memory — a test about the
+parser rejecting corruption today, not about compatibility with the past.
+`src/crypto.test.ts` gained a dedicated LF/CRLF round-trip check (the
+primitives operate on raw bytes, no text-mode normalization of their own),
+and `src/bin.integration.test.ts` gained a two-separate-`node`-processes
+determinism check for `clean`, alongside the existing in-process one in
+`src/filter.test.ts`.
+
+The provider conformance suite ([06](06-key-provider-port.md)) is next:
+`src/provider.conformance.test.ts` runs `describe.each` over a
+`{ name, makeProvider }` registration list — one row today,
+`passphrase-file` — so the same contract battery (`describe()`'s shape,
+`available()` resolving promptly without a prompt, `init()` producing
+flat JSON-serialisable state, `wrap`/`unwrap` round-tripping and returning
+`Secret`-marked material, failing under a wrong `repoId` or `generation`)
+runs once per provider rather than being specific to
+`PassphraseFileProvider`. A second real provider is a new row, not a new
+test file. "Never receives a path or file content" is proved
+behaviourally: a recording wrapper intercepts every argument actually
+passed to `init`/`wrap`/`unwrap` across a full cycle and asserts none of
+it carries a key matching `path`, `content` or `plaintext`, recursing
+through nested objects but treating a `Buffer` as opaque key material
+rather than a container to inspect. `src/provider.test.ts` is unchanged —
+it keeps everything specific to `passphrase-file` itself.
+
+615 unit tests, all green; 26 integration tests, all green. The package is
+TypeScript (`src/` → `dist/`, NodeNext, `strict` plus
+`noUncheckedIndexedAccess` and `exactOptionalPropertyTypes`), matching
+`@trinoris/decision-core`. Unit
 tests sit beside the source as `*.test.ts`; integration tests are
 `*.integration.test.ts` and run from `vitest.integration.config.ts`.
 
 | | Implemented | Designed only |
 |---|---|---|
-| Cryptography | derivations, envelope, padding | known-answer vectors |
+| Cryptography | derivations, envelope, padding, known-answer vectors | — |
 | Git integration | filters, attributes, filter-process, real-`git` round trip | — |
 | Keys | keyring, passphrase provider, session, identity keypair/encoding, recipient wrap/unwrap, rotation, recovery export/import | — |
-| Tooling | CLI (`init`/`init --pad-to`/`install`/`protect`/`unlock`/`lock`/`status`/`status --json`/`identity`/`key add-recipient`/`key remove-recipient`/`key rotate`/`reencrypt`/`key export-recovery`/`key import-recovery`/`verify`/`verify --access`/`verify --history`/`verify --json`/`clean`/`smudge`/`textconv`/`merge`/`encrypt`/`decrypt`/`inspect`/`inspect --json`/`filter-process`) | — |
+| Tooling | CLI (`init`/`init --pad-to`/`install`/`protect`/`unprotect`/`unlock`/`lock`/`status`/`status --json`/`identity`/`key add-recipient`/`key remove-recipient`/`key rotate`/`reencrypt`/`key export-recovery`/`key import-recovery`/`verify`/`verify --access`/`verify --history`/`verify --json`/`clean`/`smudge`/`textconv`/`merge`/`encrypt`/`decrypt`/`inspect`/`inspect --json`/`filter-process`) | — |
 
 The three things that had to be got right before anything else, because they
 cannot be changed later without breaking every repository already in use, are

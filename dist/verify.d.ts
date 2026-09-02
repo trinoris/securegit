@@ -11,7 +11,7 @@ export interface CheckResult {
     ok: boolean;
     detail?: string;
 }
-export type FindingKind = 'leak' | 'advice' | 'residue';
+export type FindingKind = 'leak' | 'advice' | 'residue' | 'recovery';
 export interface Finding {
     kind: FindingKind;
     path: string;
@@ -47,12 +47,35 @@ export declare function listTrackedPaths(repoDir: string): Promise<string[]>;
 export declare function checkAttr(repoDir: string, path: string): Promise<Record<string, string>>;
 /** The index's copy of a tracked path — what would be committed right now. Exported for `cli.ts`'s `reencrypt`. */
 export declare function readIndexBlob(repoDir: string, path: string): Promise<Buffer>;
+export interface RecoveryPathStatus {
+    /** Independent paths that can unlock the current generation: the local keyring (if present) plus recipients covering it. */
+    paths: number;
+    hasExport: boolean;
+    /** `paths < 2 && !hasExport` — losing the one path left loses the repository. */
+    warn: boolean;
+}
+/**
+ * Whether losing this machine loses the repository. Reads only the local
+ * keyring file, `.securegit/recipients/`, and the recovery log — cheap
+ * enough for `securegit status` to call directly, not gated behind a full
+ * `verify()` scan. Returns `null` when there is no local keyring to
+ * determine "the current generation" from at all — a machine that joined
+ * purely via a recipient file has no authoritative answer to "what's
+ * current" of its own (08-multi-recipient.md), so this check simply
+ * doesn't run there rather than guessing.
+ */
+export declare function recoveryPathStatus(opts: {
+    repoDir: string;
+    home: string;
+}): Promise<RecoveryPathStatus | null>;
 export declare function verify(opts: VerifyOptions): Promise<VerifyReport>;
 export interface AccessRecipient {
     fingerprint: string;
     label: string;
     addedAt: string;
     addedBy: string;
+    /** The oldest commit that added this recipient file, or `null` if it was never committed (T5, 16-adversarial-integrity.md). */
+    addedCommit: string | null;
     /** Sorted ascending. Not necessarily contiguous — a recipient can predate a rotation, join after one, or both. */
     generations: number[];
 }

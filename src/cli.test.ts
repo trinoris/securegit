@@ -3,7 +3,7 @@ import { execFile as execFileCb } from 'node:child_process';
 import { promisify } from 'node:util';
 import { mkdtemp, rm, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { looksLikeEnvelope, parseEnvelope } from './envelope.js';
 import { runCli, runFilterProcess, type CliIO, type FilterProcessIO } from './cli.js';
@@ -125,6 +125,53 @@ describe('init', () => {
   });
 });
 
+describe('--repo <path>', () => {
+  let otherDir: string;
+
+  beforeEach(async () => {
+    otherDir = await mkdtemp(join(tmpdir(), 'securegit-cli-repo-flag-'));
+    await mkdir(join(otherDir, '.git'));
+  });
+
+  afterEach(async () => {
+    await rm(otherDir, { recursive: true, force: true });
+  });
+
+  it('operates on the named repository instead of the default cwd, flag before the command', async () => {
+    const h = harness();
+    expect(await h.run(['--repo', otherDir, 'init'])).toBe(0);
+    await expect(readFile(join(otherDir, '.securegit', 'config.json'))).resolves.toBeDefined();
+    await expect(readFile(join(dir, '.securegit', 'config.json'))).rejects.toThrow();
+  });
+
+  it('works with the flag placed after the command too', async () => {
+    const h = harness();
+    expect(await h.run(['init', '--repo', otherDir])).toBe(0);
+    await expect(readFile(join(otherDir, '.securegit', 'config.json'))).resolves.toBeDefined();
+  });
+
+  it('resolves a relative path against the default cwd', async () => {
+    const relativePath = relative(dir, otherDir);
+    const h = harness();
+    expect(await h.run(['--repo', relativePath, 'init'])).toBe(0);
+    await expect(readFile(join(otherDir, '.securegit', 'config.json'))).resolves.toBeDefined();
+  });
+
+  it('exits usage when --repo has no path argument', async () => {
+    const h = harness();
+    expect(await h.run(['--repo'])).toBe(4);
+  });
+
+  it('combines with other flags — e.g. status --json — and never leaks into the stripped argv', async () => {
+    const h = harness();
+    await h.run(['--repo', otherDir, 'init']);
+    await h.run(['--repo', otherDir, 'unlock']);
+    expect(await h.run(['--repo', otherDir, 'status', '--json'])).toBe(0);
+    const parsed = JSON.parse(h.stdoutText());
+    expect(parsed.repository).toBe(otherDir);
+  });
+});
+
 describe('install', () => {
   it('succeeds inside a real git repository', async () => {
     const { execFile } = await import('node:child_process');
@@ -167,6 +214,34 @@ describe('protect', () => {
     expect(await h.run(['protect', '.env'])).toBe(0);
     const content = await readFile(join(dir, '.gitattributes'), 'utf8');
     expect(content).toContain('.env filter=securegit diff=securegit merge=securegit -text');
+  });
+});
+
+describe('unprotect', () => {
+  it('exits 4 with no patterns', async () => {
+    const h = harness();
+    expect(await h.run(['unprotect'])).toBe(4);
+  });
+
+  it('removes the pattern from .gitattributes and warns about already-committed blobs', async () => {
+    const h = harness();
+    await h.run(['protect', '.env']);
+    expect(await h.run(['unprotect', '.env'])).toBe(0);
+    const content = await readFile(join(dir, '.gitattributes'), 'utf8');
+    expect(content).not.toContain('.env filter=securegit');
+    expect(h.stderrText()).toContain('stay encrypted');
+  });
+
+  it('is a silent no-op (exit 0) for a pattern that was never protected', async () => {
+    const h = harness();
+    expect(await h.run(['unprotect', '.never-protected'])).toBe(0);
+  });
+
+  it('writes nothing to stdout', async () => {
+    const h = harness();
+    await h.run(['protect', '.env']);
+    await h.run(['unprotect', '.env']);
+    expect(h.stdoutCalls()).toBe(0);
   });
 });
 
@@ -270,6 +345,38 @@ describe('unlock / lock / status', () => {
     const text = h.stderrText();
     expect(text).toContain('padTo');
     expect(text).toContain('status --json');
+  });
+
+  it('warns about a single recovery path for a fresh solo repository, in both forms', async () => {
+    const h = harness();
+    await h.run(['init']);
+    await h.run(['unlock']);
+
+    await h.run(['status']);
+    expect(h.stderrText()).toMatch(/recovery.*⚠.*1 recovery path/);
+
+    expect(await h.run(['status', '--json'])).toBe(0);
+    const parsed = JSON.parse(h.stdoutText());
+    expect(parsed.recoveryPaths).toEqual({ paths: 1, hasExport: false, warn: true });
+  });
+
+  it('stops warning once a second recipient covers the current generation', async () => {
+    const h = harness();
+    await h.run(['init']);
+    await h.run(['unlock']);
+
+    const otherHome = await mkdtemp(join(tmpdir(), 'securegit-cli-recovery-path-identity-'));
+    const other = harness({ home: otherHome });
+    await other.run(['identity', 'init']);
+    const identity = JSON.parse(await readFile(join(otherHome, '.securegit', 'identity.json'), 'utf8'));
+    await h.run(['key', 'add-recipient', identity.publicKey, '--label', 'laptop']);
+
+    await h.run(['status']);
+    expect(h.stderrText()).not.toContain('recovery ');
+
+    await h.run(['status', '--json']);
+    const parsed = JSON.parse(h.stdoutText());
+    expect(parsed.recoveryPaths).toEqual({ paths: 2, hasExport: false, warn: false });
   });
 });
 
@@ -814,6 +921,23 @@ describe('verify', () => {
       expect(text).toContain(identity.fingerprint);
       expect(text).toContain('laptop');
       expect(text).toContain('gen 1');
+      // `add-recipient` deliberately doesn't commit its own output.
+      expect(text).toContain('(uncommitted)');
+
+      await h.run(['verify', '--access', '--json']);
+      const parsed = JSON.parse(h.stdoutText());
+      expect(parsed.recipients[0].addedCommit).toBe(null);
+
+      await execFile('git', ['add', '.securegit/recipients'], { cwd: realDir });
+      await execFile('git', ['commit', '--quiet', '-m', 'add recipient'], { cwd: realDir });
+      const expectedSha = (await execFile('git', ['log', '-1', '--format=%h'], { cwd: realDir })).stdout.trim();
+
+      expect(await h.run(['verify', '--access'])).toBe(0);
+      expect(h.stderrText()).toContain(`commit ${expectedSha}`);
+
+      await h.run(['verify', '--access', '--json']);
+      const parsedAfterCommit = JSON.parse(h.stdoutText());
+      expect(parsedAfterCommit.recipients[0].addedCommit).toBe(expectedSha);
     });
 
     it('lists a recovery export, with the non-revocable-access warning', async () => {
@@ -928,7 +1052,9 @@ describe('verify', () => {
       const parsed = JSON.parse(h.stdoutText());
       expect(Array.isArray(parsed.checks)).toBe(true);
       expect(parsed.checks.every((c: { ok: boolean }) => c.ok)).toBe(true);
-      expect(parsed.findings).toEqual([]);
+      // A solo repo with no recipients and no recovery export is a genuine
+      // single point of failure — this advisory finding is expected, not noise.
+      expect(parsed.findings).toEqual([{ kind: 'recovery', path: '(repository)', detail: expect.any(String) }]);
     });
   });
 });
@@ -1006,14 +1132,27 @@ describe('key rotate / reencrypt', () => {
       expect(await h.run(['key', 'rotate', '--bind-path'])).toBe(4);
     });
 
+    it('refuses without --confirm-recipients, printing the (empty) recipient list', async () => {
+      const h = await setUp();
+      expect(await h.run(['key', 'rotate'])).toBe(4);
+      const text = h.stderrText();
+      expect(text).toContain('0 recipient');
+      expect(text).toContain('--confirm-recipients 0');
+    });
+
+    it('refuses a --confirm-recipients count that does not match reality', async () => {
+      const h = await setUp();
+      expect(await h.run(['key', 'rotate', '--confirm-recipients', '3'])).toBe(4);
+    });
+
     it('refuses a dirty working tree', async () => {
       const h = await setUp();
       await writeFile(join(realDir, 'untracked.txt'), 'dirty\n');
       await execFile('git', ['add', 'untracked.txt'], { cwd: realDir, env: gitEnv(realHome) });
-      expect(await h.run(['key', 'rotate'])).toBe(4);
+      expect(await h.run(['key', 'rotate', '--confirm-recipients', '0'])).toBe(4);
     });
 
-    it('refuses when locked', async () => {
+    it('refuses when locked, before ever asking for recipient confirmation', async () => {
       const h = await setUp();
       await h.run(['lock']);
       expect(await h.run(['key', 'rotate'])).toBe(1);
@@ -1021,7 +1160,7 @@ describe('key rotate / reencrypt', () => {
 
     it('adds a generation, keeps the old one, and invalidates the session', async () => {
       const h = await setUp();
-      expect(await h.run(['key', 'rotate'])).toBe(0);
+      expect(await h.run(['key', 'rotate', '--confirm-recipients', '0'])).toBe(0);
       expect(await h.run(['status'])).toBe(1); // rotate locks; a fresh unlock is required
 
       await h.run(['unlock']);
@@ -1056,7 +1195,11 @@ describe('key rotate / reencrypt', () => {
           env: gitEnv(realHome),
         });
 
-        expect(await h.run(['key', 'rotate'])).toBe(0);
+        // Without confirmation, the list names the actual recipient.
+        expect(await h.run(['key', 'rotate'])).toBe(4);
+        expect(h.stderrText()).toContain(identity.fingerprint);
+
+        expect(await h.run(['key', 'rotate', '--confirm-recipients', '1'])).toBe(0);
 
         const recipientFile = JSON.parse(
           await readFile(
@@ -1078,7 +1221,7 @@ describe('key rotate / reencrypt', () => {
   describe('reencrypt', () => {
     it('--dry-run stages nothing', async () => {
       const h = await setUp();
-      await h.run(['key', 'rotate']);
+      await h.run(['key', 'rotate', '--confirm-recipients', '0']);
       await h.run(['unlock']);
 
       const before = await realGit(['status', '--porcelain']);
@@ -1089,7 +1232,7 @@ describe('key rotate / reencrypt', () => {
 
     it('moves a protected file to the current generation, staged but not committed', async () => {
       const h = await setUp();
-      await h.run(['key', 'rotate']);
+      await h.run(['key', 'rotate', '--confirm-recipients', '0']);
       await h.run(['unlock']);
 
       const beforeHead = await realGit(['rev-parse', `HEAD:${PATH}`]);
@@ -1112,7 +1255,7 @@ describe('key rotate / reencrypt', () => {
 
     it('is a no-op the second time, once everything is already current', async () => {
       const h = await setUp();
-      await h.run(['key', 'rotate']);
+      await h.run(['key', 'rotate', '--confirm-recipients', '0']);
       await h.run(['unlock']);
       await h.run(['reencrypt']);
 

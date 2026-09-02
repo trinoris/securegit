@@ -384,3 +384,32 @@ describe('end-to-end determinism (the property the whole design exists for)', ()
     }
   });
 });
+
+describe('round-trip stability across line endings', () => {
+  // None of these primitives know what a line ending is — they operate on
+  // raw bytes. This is the test that would notice if one of them ever
+  // grew hidden text-mode behaviour (a CRLF->LF normalization, a BOM strip)
+  // that Git's own `-text` attribute is what's supposed to prevent, per
+  // specs/securegit/02-git-integration.md.
+  it('round-trips LF and CRLF content through the same tag/DEK/AEAD pipeline', () => {
+    const K = deriveTagKey(RMK);
+    for (const pt of [
+      Buffer.from('one\ntwo\nthree\n'),
+      Buffer.from('one\r\ntwo\r\nthree\r\n'),
+      Buffer.from('mixed\nline\r\nendings\n'),
+    ]) {
+      const tag = contentTag(K, pt, null);
+      const dek = deriveFileKey(RMK, tag, null);
+      const { ciphertext, authTag } = aeadEncrypt(dek, tag.subarray(0, NONCE_LEN), pt, null);
+      const out = aeadDecrypt(dek, tag.subarray(0, NONCE_LEN), ciphertext, authTag, null);
+      expect(out.equals(pt)).toBe(true);
+    }
+  });
+
+  it('LF and CRLF spellings of the same text are different plaintexts, so they derive different tags', () => {
+    const K = deriveTagKey(RMK);
+    const lf = Buffer.from('one\ntwo\nthree\n');
+    const crlf = Buffer.from('one\r\ntwo\r\nthree\r\n');
+    expect(contentTag(K, lf, null).equals(contentTag(K, crlf, null))).toBe(false);
+  });
+});

@@ -76,4 +76,29 @@ describe('the real securegit binary', () => {
       await rm(home, { recursive: true, force: true });
     }
   });
+
+  it('clean is byte-identical across two separate OS processes given the same input', async () => {
+    // The unit-test version of this (src/filter.test.ts, "is deterministic")
+    // proves the function is pure; this proves it stays pure once split
+    // across process boundaries — no PID, no env, no timestamp, no
+    // filesystem state leaking into the derivation. See
+    // specs/securegit/03-determinism.md.
+    const d = await mkdtemp(join(tmpdir(), 'securegit-bin-clean-'));
+    const h = await mkdtemp(join(tmpdir(), 'securegit-bin-clean-home-'));
+    try {
+      await mkdir(join(d, '.git'));
+      await run(['init'], { cwd: d, home: h, passphrase: 'correct horse battery staple' });
+      await run(['unlock'], { cwd: d, home: h, passphrase: 'correct horse battery staple' });
+
+      const plaintext = Buffer.from('the same bytes, two processes\n');
+      const first = await run(['clean', '--', 'config/production.json'], { cwd: d, home: h, input: plaintext });
+      const second = await run(['clean', '--', 'config/production.json'], { cwd: d, home: h, input: plaintext });
+      expect(first.code).toBe(0);
+      expect(second.code).toBe(0);
+      expect(first.stdout.equals(second.stdout)).toBe(true);
+    } finally {
+      await rm(d, { recursive: true, force: true });
+      await rm(h, { recursive: true, force: true });
+    }
+  });
 });

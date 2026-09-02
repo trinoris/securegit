@@ -8,6 +8,7 @@ import {
   InstallError,
   install,
   protect,
+  unprotect,
   swapPattern,
   EXCLUSION_LINE,
 } from './install.js';
@@ -281,6 +282,61 @@ describe('protect()', () => {
       const content = await readIgnore();
       expect(content).not.toContain('.env~');
     });
+  });
+});
+
+describe('unprotect()', () => {
+  const gitattributesPath = (): string => join(dir, '.gitattributes');
+  const readAttrs = async (): Promise<string> => readFile(gitattributesPath(), 'utf8');
+  const gitignorePath = (): string => join(dir, '.gitignore');
+  const readIgnore = async (): Promise<string> => readFile(gitignorePath(), 'utf8').catch(() => '');
+
+  it('refuses an empty pattern list', async () => {
+    await expect(unprotect(dir, [])).rejects.toBeInstanceOf(InstallError);
+  });
+
+  it('removes the pattern line, keeping the exclusion line', async () => {
+    await protect(dir, ['.env']);
+    await unprotect(dir, ['.env']);
+    const lines = (await readAttrs()).trimEnd().split('\n');
+    expect(lines).toEqual([EXCLUSION_LINE]);
+  });
+
+  it('removes only the named pattern, leaving the others intact', async () => {
+    await protect(dir, ['.env', '*.secret']);
+    await unprotect(dir, ['.env']);
+    const content = await readAttrs();
+    expect(content).not.toContain('.env filter=securegit');
+    expect(content).toContain('*.secret filter=securegit');
+  });
+
+  it('accepts multiple patterns in one call', async () => {
+    await protect(dir, ['.env', '*.secret', 'config/production.*']);
+    await unprotect(dir, ['.env', '*.secret']);
+    const content = await readAttrs();
+    expect(content).not.toContain('.env filter=securegit');
+    expect(content).not.toContain('*.secret filter=securegit');
+    expect(content).toContain('config/production.* filter=securegit');
+  });
+
+  it('is a silent no-op for a pattern that was never protected', async () => {
+    await protect(dir, ['.env']);
+    await unprotect(dir, ['*.never-protected']);
+    const content = await readAttrs();
+    expect(content).toContain('.env filter=securegit');
+  });
+
+  it('does not touch .gitignore residue entries — harmless once unprotected, and removing them could unhide real residue', async () => {
+    await protect(dir, ['.env']);
+    await unprotect(dir, ['.env']);
+    const content = await readIgnore();
+    expect(content).toContain('.env~');
+  });
+
+  it('leaves .gitattributes empty (aside from nothing, since the exclusion survives) when nothing was ever protected', async () => {
+    await expect(readAttrs()).rejects.toThrow(); // no .gitattributes exists yet
+    await unprotect(dir, ['.env']); // no-op, must not throw
+    await expect(readAttrs()).rejects.toThrow(); // still doesn't exist
   });
 });
 

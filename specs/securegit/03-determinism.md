@@ -11,7 +11,17 @@ tested, because every other design choice follows from it — `src/crypto.ts`'s
 keyed convergent nonce, proven in `src/crypto.test.ts` and end to end in
 `src/git.integration.test.ts` (`git status` clean immediately after commit,
 after branch switches, after `stash`/`stash pop`, after re-adding an
-unchanged file).
+unchanged file). `src/vectors.test.ts` and `tests/fixtures/vectors/v1.json`
+close the known-answer-vector row: six cases (empty, one byte, 4095 bytes, a
+UTF-8 BOM, CRLF content, `bindPath`) generated once from `seal()`/`unseal()`
+as they exist today, frozen as hex, and asserted byte-for-byte on every run —
+a failure there means the wire format moved, not that a test assumption
+drifted. `src/crypto.test.ts` also gained a dedicated LF/CRLF round-trip
+check: the primitives operate on raw bytes and do no text-mode normalization
+of their own, which is what makes `-text` on protected paths ([02](02-git-integration.md))
+necessary rather than redundant. And `src/bin.integration.test.ts` proves
+`clean` byte-identical across two separate `node` processes given the same
+stdin — the process-boundary version of the same purity claim.
 
 ## Core Principle
 
@@ -149,12 +159,12 @@ cryptographic one:
 
 | Test | Test File | Fixture | Status |
 |------|-----------|---------|--------|
-| `clean` of the same input twice is byte-identical | `src/crypto.test.ts` | — | 🔲 |
-| `clean` in two separate processes is byte-identical | `src/git.integration.test.ts` | — | 🔲 |
+| `clean` of the same input twice is byte-identical | `src/filter.test.ts` | — | ✅ |
+| `clean` in two separate processes is byte-identical | `src/bin.integration.test.ts` | — | ✅ |
 | Different plaintexts derive different DEKs | `src/crypto.test.ts` | — | ✅ |
 | A one-bit plaintext change changes `tag` and the whole ciphertext | `src/crypto.test.ts` | — | ✅ |
-| Known-answer vectors match the committed fixtures | `src/vectors.test.ts` | `vectors/` | 🔲 |
-| Round-trip is stable across `\n` and `\r\n` content | `src/crypto.test.ts` | — | 🔲 |
+| Known-answer vectors match the committed fixtures | `src/vectors.test.ts` | `vectors/` | ✅ |
+| Round-trip is stable across `\n` and `\r\n` content | `src/crypto.test.ts` | — | ✅ |
 | Windows-style path input normalises to the POSIX derivation | `src/crypto.test.ts` | — | ✅ |
 | `git status` is clean immediately after `commit` | `src/git.integration.test.ts` | `repo-protected/` | ✅ |
 | `git status` is clean after `checkout` of another branch and back | `src/git.integration.test.ts` | `repo-protected/` | ✅ |

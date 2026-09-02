@@ -185,6 +185,52 @@ async function findResidue(repoDir, protectedPath, trackedPaths) {
     }
     return found;
 }
+/**
+ * Whether losing this machine loses the repository. Reads only the local
+ * keyring file, `.securegit/recipients/`, and the recovery log — cheap
+ * enough for `securegit status` to call directly, not gated behind a full
+ * `verify()` scan. Returns `null` when there is no local keyring to
+ * determine "the current generation" from at all — a machine that joined
+ * purely via a recipient file has no authoritative answer to "what's
+ * current" of its own (08-multi-recipient.md), so this check simply
+ * doesn't run there rather than guessing.
+ */
+export async function recoveryPathStatus(opts) {
+    let repoId;
+    try {
+        repoId = (await readConfig(opts.repoDir)).repoId;
+    }
+    catch {
+        return null;
+    }
+    let current;
+    let localHolder;
+    try {
+        const keyring = await readKeyringFile(resolveKeyringPath(repoId, opts.home));
+        current = keyring.current;
+        const currentGen = keyring.generations.find((g) => g.generation === current);
+        localHolder = currentGen !== undefined && currentGen.wrapped.length > 0;
+    }
+    catch {
+        return null;
+    }
+    let recipientCount = 0;
+    try {
+        const entries = (await readdir(recipientsDir(opts.repoDir))).filter((f) => f.endsWith('.json'));
+        for (const entry of entries) {
+            const recipient = await readRecipientFile(recipientPath(opts.repoDir, entry.replace(/\.json$/, '')));
+            if (recipient.keys[String(current)])
+                recipientCount += 1;
+        }
+    }
+    catch {
+        // no recipients directory
+    }
+    const recoveryExports = await readRecoveryLog(recoveryLogPath(opts.repoDir));
+    const paths = (localHolder ? 1 : 0) + recipientCount;
+    const hasExport = recoveryExports.length > 0;
+    return { paths, hasExport, warn: paths < 2 && !hasExport };
+}
 // ---------------------------------------------------------------------------
 export async function verify(opts) {
     const checks = [];
@@ -248,6 +294,15 @@ export async function verify(opts) {
                     ? { detail: `session path ${sessionPath} is inside the repository` }
                     : {}),
         });
+        const recovery = await recoveryPathStatus({ repoDir: opts.repoDir, home: opts.home });
+        if (recovery?.warn) {
+            findings.push({
+                kind: 'recovery',
+                path: '(repository)',
+                detail: `only ${recovery.paths} recovery path${recovery.paths === 1 ? '' : 's'} to the current ` +
+                    `generation, and no recovery export on record — losing it means losing the repository`,
+            });
+        }
     }
     const cleanCfg = await gitConfigGet(opts.repoDir, 'filter.securegit.clean');
     const processCfg = await gitConfigGet(opts.repoDir, 'filter.securegit.process');
@@ -336,6 +391,25 @@ function sortedGenerationKeys(keys) {
         .sort((a, b) => a - b);
 }
 /**
+ * The oldest commit that added `relativePath` to the tree (T5,
+ * 16-adversarial-integrity.md) — `git log` lists newest first, so the last
+ * line of `--diff-filter=A` output is the first time it was ever added,
+ * even if it was later removed and re-added. `null`, not an error, when the
+ * path was never committed at all (the common state right after `key
+ * add-recipient`, which deliberately doesn't commit its own output) or the
+ * repository has no commits yet.
+ */
+async function firstAddedCommit(repoDir, relativePath) {
+    try {
+        const { stdout } = await execFile('git', ['log', '--diff-filter=A', '--format=%h', '--', relativePath], { cwd: repoDir });
+        const shas = stdout.split('\n').filter((s) => s.length > 0);
+        return shas.length > 0 ? shas[shas.length - 1] : null;
+    }
+    catch {
+        return null;
+    }
+}
+/**
  * "Who can read this repository, now and previously" — recipients, the
  * providers wrapping the keyring, and the two append-only logs
  * (`recovery-log.json`, `removed-recipients.json`). Like `verify()`, this
@@ -354,11 +428,13 @@ export async function accessReport(opts) {
     }
     for (const entry of entries) {
         const file = await readRecipientFile(recipientPath(opts.repoDir, entry.replace(/\.json$/, '')));
+        const addedCommit = await firstAddedCommit(opts.repoDir, posix.join('.securegit', 'recipients', entry));
         recipients.push({
             fingerprint: file.fingerprint,
             label: file.label,
             addedAt: file.addedAt,
             addedBy: file.addedBy,
+            addedCommit,
             generations: sortedGenerationKeys(file.keys),
         });
     }

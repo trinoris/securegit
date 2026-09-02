@@ -14,6 +14,22 @@ providers (`tpm2`, `piv`, `os-keychain`) sit behind this same port,
 unimplemented, by design — see [00](00-test-plan.md)'s "Deliberately not
 phased" note.
 
+`src/provider.conformance.test.ts` is the contract suite this document
+promises: `describe.each` over a `{ name, makeProvider }` registration list
+(today, one row — `passphrase-file`), so every case below runs once per
+registered provider rather than once for `PassphraseFileProvider`
+specifically. Adding a second real provider means adding a row, not a new
+test file. The "never receives a path or file content" row is proved
+behaviourally, not just by the TypeScript types: a small recording wrapper
+intercepts every argument actually passed to `init`/`wrap`/`unwrap` across a
+full cycle and asserts none of it — recursively, skipping `Buffer`s, which
+are the key material itself — carries a key matching `path`, `content` or
+`plaintext`. `src/provider.test.ts` keeps everything specific to
+`PassphraseFileProvider` (its scrypt parameters, its exact error strings);
+the split mirrors `src/vectors.test.ts` vs. `src/envelope.test.ts` from
+[03](03-determinism.md)/[04](04-envelope-format.md) — one file proves the
+implementation, the other proves the contract every implementation shares.
+
 ## Core Principle
 
 > A provider wraps and unwraps a 32-byte key. It never sees a plaintext file, a
@@ -189,7 +205,7 @@ always have at least one non-custodial way back in.
 
 | Test | Test File | Fixture | Status |
 |------|-----------|---------|--------|
-| Conformance suite passes for every provider | `src/provider.conformance.test.ts` | — | 🔲 |
+| Conformance suite passes for every provider | `src/provider.conformance.test.ts` | — | ✅ |
 | `wrap` then `unwrap` returns the identical key | `src/provider.conformance.test.ts` | — | ✅ |
 | `unwrap` with the wrong `repoId` fails | `src/provider.conformance.test.ts` | — | ✅ |
 | `unwrap` with the wrong `generation` fails | `src/provider.conformance.test.ts` | — | ✅ |
@@ -201,7 +217,7 @@ always have at least one non-custodial way back in.
 | Passphrase under 12 characters is refused at `init` | `src/provider.test.ts` | — | ✅ |
 | Removing the last non-custodial provider is refused | `src/keyring.test.ts` | — | 🔲 |
 | A custodial-only repository is a `verify` finding | `src/verify.test.ts` | — | ✅ |
-| Provider never receives a path or file content | `src/provider.conformance.test.ts` | — | 🔲 |
+| Provider never receives a path or file content | `src/provider.conformance.test.ts` | — | ✅ |
 
 ## Relationship to Other Specs
 

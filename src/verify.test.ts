@@ -17,6 +17,7 @@ import {
   accessReport,
   historyReport,
   metadataReport,
+  recoveryPathStatus,
   NAME_HEURISTICS,
   CONTENT_HEURISTICS,
   EXIT_VERIFY_OK,
@@ -140,14 +141,20 @@ async function commitPlaintext(relPath: string, content: string): Promise<void> 
 }
 
 describe('verify()', () => {
-  it('a clean, correctly configured repository passes every check with no findings', async () => {
+  it('a clean, correctly configured repository passes every check, with only the recovery-path advisory', async () => {
     const { rmk, keyId, provider } = await setUpProtectedRepo();
     await commitEncrypted(rmk, keyId, 'config/production.json', Buffer.from('{"password":"hunter2"}\n'));
 
     const report = await verify({ repoDir: dir, home, providers: [provider] });
 
     expect(report.checks.every((c) => c.ok)).toBe(true);
-    expect(report.findings).toEqual([]);
+    // A solo repo with no recipients and no recovery export genuinely is a
+    // single point of failure — this finding is the point, not noise to
+    // suppress. See the 'recoveryPathStatus()' / 'single recovery path'
+    // describe blocks below for its dedicated coverage.
+    expect(report.findings).toEqual([
+      { kind: 'recovery', path: '(repository)', detail: expect.stringContaining('recovery path') },
+    ]);
     expect(verifyExitCode(report)).toBe(EXIT_VERIFY_OK);
   });
 
@@ -397,6 +404,14 @@ describe('verifyExitCode()', () => {
   it('is 0 for an entirely empty report', () => {
     expect(verifyExitCode({ checks: [], findings: [] })).toBe(EXIT_VERIFY_OK);
   });
+
+  it('is 0 when only a recovery finding is present — advice tier, not a leak', () => {
+    const report: VerifyReport = {
+      checks: [{ id: 'filter-required', label: 'x', ok: true }],
+      findings: [{ kind: 'recovery', path: '(repository)', detail: 'x' }],
+    };
+    expect(verifyExitCode(report)).toBe(EXIT_VERIFY_OK);
+  });
 });
 
 function singleKeySource(keyId: string, rmk: Buffer): KeySource {
@@ -406,6 +421,106 @@ function singleKeySource(keyId: string, rmk: Buffer): KeySource {
     available: () => [keyId],
   };
 }
+
+describe('recoveryPathStatus()', () => {
+  it('reports exactly 1 path and no export for a fresh solo repository — and warns', async () => {
+    await setUpProtectedRepo();
+    const status = await recoveryPathStatus({ repoDir: dir, home });
+    expect(status).toEqual({ paths: 1, hasExport: false, warn: true });
+  });
+
+  it('counts a recipient covering the current generation as a second path, and stops warning', async () => {
+    const { repoId, rmk, keyId } = await setUpProtectedRepo();
+    const recipientKeyPair = generateX25519KeyPair();
+    const fingerprint = identityFingerprint(recipientKeyPair.publicKey);
+    const wrapped = wrapAllGenerations(singleKeySource(keyId, rmk), [keyId], recipientKeyPair.publicKey, repoId);
+    const file: RecipientFile = {
+      version: 1,
+      fingerprint,
+      publicKey: 'SGPUB1-does-not-need-to-decode-for-this-test',
+      label: 'laptop',
+      addedAt: '2026-01-14T00:00:00.000Z',
+      addedBy: '',
+      keys: wrapped,
+    };
+    await writeRecipientFile(recipientPath(dir, fingerprint), file);
+
+    const status = await recoveryPathStatus({ repoDir: dir, home });
+    expect(status).toEqual({ paths: 2, hasExport: false, warn: false });
+  });
+
+  it('a recipient file that does not cover the current generation does not count as a path', async () => {
+    const { repoId, rmk, keyId } = await setUpProtectedRepo();
+    const recipientKeyPair = generateX25519KeyPair();
+    const fingerprint = identityFingerprint(recipientKeyPair.publicKey);
+    // Wrapped for a generation that isn't this repo's current one.
+    const wrapped = wrapAllGenerations(singleKeySource(keyId, rmk), [keyId], recipientKeyPair.publicKey, repoId);
+    const file: RecipientFile = {
+      version: 1,
+      fingerprint,
+      publicKey: 'SGPUB1-does-not-need-to-decode-for-this-test',
+      label: 'laptop',
+      addedAt: '2026-01-14T00:00:00.000Z',
+      addedBy: '',
+      keys: { '99': wrapped['1']! }, // relabel to a generation that isn't current
+    };
+    await writeRecipientFile(recipientPath(dir, fingerprint), file);
+
+    const status = await recoveryPathStatus({ repoDir: dir, home });
+    expect(status).toEqual({ paths: 1, hasExport: false, warn: true });
+  });
+
+  it('does not warn once a recovery export is on record, even with just the local keyring', async () => {
+    await setUpProtectedRepo();
+    await appendRecoveryLogEntry(recoveryLogPath(dir), {
+      exportId: 'ab12cd34',
+      timestamp: '2026-01-20T00:00:00.000Z',
+      exportedBy: '',
+      generations: [1],
+    });
+
+    const status = await recoveryPathStatus({ repoDir: dir, home });
+    expect(status).toEqual({ paths: 1, hasExport: true, warn: false });
+  });
+
+  it('returns null when there is no local keyring to determine the current generation from', async () => {
+    await initConfig(dir); // no createKeyring/writeKeyringFile
+    const status = await recoveryPathStatus({ repoDir: dir, home });
+    expect(status).toBe(null);
+  });
+});
+
+describe('single recovery path (verify() finding)', () => {
+  it('is present, advice-tier, for a solo repo with no export', async () => {
+    const { rmk, keyId, provider } = await setUpProtectedRepo();
+    await commitEncrypted(rmk, keyId, 'config/production.json', Buffer.from('{"password":"hunter2"}\n'));
+
+    const report = await verify({ repoDir: dir, home, providers: [provider] });
+    expect(report.findings.find((f) => f.kind === 'recovery')).toBeDefined();
+    expect(verifyExitCode(report)).toBe(EXIT_VERIFY_OK);
+  });
+
+  it('is absent once a second recipient covers the current generation', async () => {
+    const { repoId, rmk, keyId, provider } = await setUpProtectedRepo();
+    await commitEncrypted(rmk, keyId, 'config/production.json', Buffer.from('{"password":"hunter2"}\n'));
+
+    const recipientKeyPair = generateX25519KeyPair();
+    const fingerprint = identityFingerprint(recipientKeyPair.publicKey);
+    const wrapped = wrapAllGenerations(singleKeySource(keyId, rmk), [keyId], recipientKeyPair.publicKey, repoId);
+    await writeRecipientFile(recipientPath(dir, fingerprint), {
+      version: 1,
+      fingerprint,
+      publicKey: 'SGPUB1-does-not-need-to-decode-for-this-test',
+      label: 'laptop',
+      addedAt: '2026-01-14T00:00:00.000Z',
+      addedBy: '',
+      keys: wrapped,
+    });
+
+    const report = await verify({ repoDir: dir, home, providers: [provider] });
+    expect(report.findings.find((f) => f.kind === 'recovery')).toBeUndefined();
+  });
+});
 
 describe('accessReport()', () => {
   it('reports one provider covering the current generation, and nothing else, for a plain solo repo', async () => {
@@ -433,10 +548,72 @@ describe('accessReport()', () => {
     };
     await writeRecipientFile(recipientPath(dir, fingerprint), file);
 
+    // Never committed — `key add-recipient` deliberately doesn't commit its
+    // own output, so this is the common state right after running it.
     const report = await accessReport({ repoDir: dir, home });
     expect(report.recipients).toEqual([
-      { fingerprint, label: 'laptop', addedAt: '2026-01-14T00:00:00.000Z', addedBy: 'b30f92ac', generations: [1] },
+      {
+        fingerprint,
+        label: 'laptop',
+        addedAt: '2026-01-14T00:00:00.000Z',
+        addedBy: 'b30f92ac',
+        addedCommit: null,
+        generations: [1],
+      },
     ]);
+  });
+
+  it('names the oldest commit that added the recipient file, once committed', async () => {
+    const { repoId, rmk, keyId } = await setUpProtectedRepo();
+    const recipientKeyPair = generateX25519KeyPair();
+    const fingerprint = identityFingerprint(recipientKeyPair.publicKey);
+    const wrapped = wrapAllGenerations(singleKeySource(keyId, rmk), [keyId], recipientKeyPair.publicKey, repoId);
+    const file: RecipientFile = {
+      version: 1,
+      fingerprint,
+      publicKey: 'SGPUB1-does-not-need-to-decode-for-this-test',
+      label: 'laptop',
+      addedAt: '2026-01-14T00:00:00.000Z',
+      addedBy: 'b30f92ac',
+      keys: wrapped,
+    };
+    await writeRecipientFile(recipientPath(dir, fingerprint), file);
+    await execFile('git', ['add', '.securegit/recipients'], { cwd: dir });
+    await execFile('git', ['commit', '--quiet', '-m', 'add recipient'], { cwd: dir });
+    const expectedSha = (await execFile('git', ['log', '-1', '--format=%h'], { cwd: dir })).stdout.trim();
+
+    const report = await accessReport({ repoDir: dir, home });
+    expect(report.recipients[0]?.addedCommit).toBe(expectedSha);
+  });
+
+  it('names the oldest add when a recipient was removed and re-added', async () => {
+    const { repoId, rmk, keyId } = await setUpProtectedRepo();
+    const recipientKeyPair = generateX25519KeyPair();
+    const fingerprint = identityFingerprint(recipientKeyPair.publicKey);
+    const wrapped = wrapAllGenerations(singleKeySource(keyId, rmk), [keyId], recipientKeyPair.publicKey, repoId);
+    const file: RecipientFile = {
+      version: 1,
+      fingerprint,
+      publicKey: 'SGPUB1-does-not-need-to-decode-for-this-test',
+      label: 'laptop',
+      addedAt: '2026-01-14T00:00:00.000Z',
+      addedBy: 'b30f92ac',
+      keys: wrapped,
+    };
+    const path = recipientPath(dir, fingerprint);
+    await writeRecipientFile(path, file);
+    await execFile('git', ['add', '.securegit/recipients'], { cwd: dir });
+    await execFile('git', ['commit', '--quiet', '-m', 'add recipient'], { cwd: dir });
+    const firstAddSha = (await execFile('git', ['log', '-1', '--format=%h'], { cwd: dir })).stdout.trim();
+
+    await execFile('git', ['rm', '--quiet', '.securegit/recipients/' + `${fingerprint}.json`], { cwd: dir });
+    await execFile('git', ['commit', '--quiet', '-m', 'remove recipient'], { cwd: dir });
+    await writeRecipientFile(path, file);
+    await execFile('git', ['add', '.securegit/recipients'], { cwd: dir });
+    await execFile('git', ['commit', '--quiet', '-m', 're-add recipient'], { cwd: dir });
+
+    const report = await accessReport({ repoDir: dir, home });
+    expect(report.recipients[0]?.addedCommit).toBe(firstAddSha);
   });
 
   it('providers section reflects coverage across a rotation, not just the current generation', async () => {

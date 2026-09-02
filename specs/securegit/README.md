@@ -153,7 +153,7 @@ recovery, backed by the real `dist/bin/securegit.js` binary
 
 The phase 1 acceptance criterion is now proven against real `git`, not just
 injected `CliIO`: `src/git.integration.test.ts` drives the actual compiled
-binary as a real filter through `init`/`install`/`protect`/`unlock`, a
+binary as a real filter through `init`/`install`/`protect`/`unprotect`/`unlock`, a
 commit, a push to a bare remote, and a clone — `git status` clean throughout,
 ciphertext in `.git/objects`, plaintext in the worktree, `git diff` showing a
 real plaintext hunk via `textconv`, `stash`/`stash pop` and branch switches
@@ -349,18 +349,101 @@ Wired into `status --json`'s `metadata` field; the human-readable form gets
 one pointer line rather than twelve mostly-static ones repeated on every
 call.
 
-567 unit tests total, all green; 25 integration tests, all green. What
-remains is the genuinely inherent parts of metadata leakage
-([14](14-metadata-leakage.md)) — nothing a filter can fix. TypeScript,
+The full build order is done; work since has been closing out the backlog
+of test-coverage and small-feature rows left across the specs. First:
+the single-recovery-path advisory (specs [09](09-rotation-recovery.md),
+[13](13-verify.md), [15](15-failure-modes.md)) — `recoveryPathStatus()` in
+`verify.ts`, a cheap, session-free read (the local keyring's provider slot
+for the current generation, plus every recipient covering it, plus the
+recovery log) shared by both `verify()`'s new `'recovery'` `Finding` kind
+and `securegit status`'s own warning line. Fewer than two independent paths
+and no recovery export on record now surfaces in both places — advice-tier,
+never affecting the exit code, but real: a solo repository (the default
+state of every freshly `init`ed one) has exactly one path and warns by
+default, which is the intended behavior, not a false positive to suppress.
+
+Next: `key rotate`'s recipient-count confirmation
+([16](16-adversarial-integrity.md), T5). Recipient files are now read once
+in `cmdKeyRotate`, right after the locked check — the same in-memory list
+both drives a mandatory `--confirm-recipients <n>` gate (printing every
+current recipient's fingerprint and label, refusing on a missing or
+mismatched count) and, once confirmed, is what actually gets rewrapped, so
+there's no window for the set to change between "here's who this affects"
+and "here's who it affected." Named for the count specifically, not a bare
+`--yes`, so it catches a genuine mismatch — a recipient added or removed
+since the operator last checked — rather than just acknowledging a warning.
+
+`verify --access` naming the commit that added each recipient
+([16](16-adversarial-integrity.md), T5) is next — `AccessRecipient` gained
+`addedCommit: string | null`, resolved via `git log --diff-filter=A
+--format=%h -- <path>` against the recipient file's own repo-relative path.
+The one field in `accessReport()` that spawns `git`; everything else there
+is a plain filesystem read. The *oldest* add (the last line of `git log`'s
+newest-first output), correct even across a removed-then-re-added
+recipient sharing the same fingerprint and filename; `null`, not an error,
+for a file that was never committed (the ordinary state right after `key
+add-recipient`) or a repository with no commits yet. Surfaced in both the
+human-readable form (`commit <sha>` / `commit (uncommitted)`) and `--json`.
+
+`--repo <path>` ([10](10-cli-contract.md)) is next — the global flag that
+lets any command operate on a repository other than the current directory.
+`io.cwd` is read directly in roughly 30 places across `cli.ts`; rather than
+thread an override through each of them, `runCli` parses and strips
+`--repo` from `argv` once, before dispatch, and reassigns its own `io`
+parameter to a derived object with `cwd` resolved (`node:path`'s
+`resolve`, so a relative path works against the real `cwd`) and the flag
+removed. Every existing command case picks it up for free, since none of
+them changes — the whole implementation is those few lines at the top of
+`runCli`. Works with the flag before or after the command name; missing
+its path argument exits 4.
+
+`unprotect <pattern>…` ([02](02-git-integration.md)) is next — `protect`'s
+counterpart, removing patterns from `.gitattributes` only.
+`.gitignore`'s residue entries stay untouched (harmless once unprotected,
+and removing them could unhide files a user still wants ignored for
+unrelated reasons), and it's forward-only exactly like key rotation: a
+blob already committed as ciphertext stays ciphertext until the file is
+actually edited and re-added. A pattern that was never protected, or a
+call before `.gitattributes` exists at all, is a silent no-op — the file
+is left exactly as it was, not written unconditionally.
+
+Known-answer vectors ([03](03-determinism.md), [04](04-envelope-format.md),
+[05](05-key-hierarchy.md)) are next — `src/vectors.test.ts` plus committed
+fixtures. `tests/fixtures/vectors/v1.json` freezes six `seal()`/`unseal()`
+cases as hex (empty, one byte, 4095 bytes, a UTF-8 BOM, CRLF content,
+`bindPath`), generated once from the implementation as it stands today, and
+pins the `securegit/tag/v1`/`securegit/dek/v1` HKDF labels directly via an
+`hkdf` block. `tests/fixtures/envelopes/v1-basic.bin` and `v1-bindpath.bin`
+are two committed envelopes that must keep decrypting under their frozen
+key forever — the tampered-envelope fixtures 00-test-plan.md's own
+catalogue lists were deliberately not built as separate files, since
+`envelope.test.ts` already covers that ground by tampering a freshly-sealed
+envelope in memory, a test about the parser today rather than compatibility
+with the past. `src/crypto.test.ts` gained an LF/CRLF round-trip check, and
+`src/bin.integration.test.ts` gained a two-separate-processes determinism
+check for `clean`.
+
+The provider conformance suite ([06](06-key-provider-port.md)) is next —
+`src/provider.conformance.test.ts` runs the same contract battery
+(`describe()`'s shape, `available()` resolving promptly, `wrap`/`unwrap`
+round-tripping and returning `Secret`-marked material, failing under a
+wrong `repoId` or `generation`, never receiving a path or file content —
+proved behaviourally via a recording wrapper, not just by the TypeScript
+types) via `describe.each` over a `{ name, makeProvider }` list. One row
+today, `passphrase-file`; a second real provider is a new row, not a new
+test file. `src/provider.test.ts` stays specific to `passphrase-file`
+itself.
+
+615 unit tests total, all green; 26 integration tests, all green. TypeScript,
 `src/` → `dist/`, unit tests beside the source, matching
 `@trinoris/decision-core`.
 
 | | Implemented | Designed only |
 |---|---|---|
-| Cryptography | derivations, envelope, padding | known-answer vectors |
+| Cryptography | derivations, envelope, padding, known-answer vectors | — |
 | Git integration | clean/smudge/textconv, attributes, filter-process, real-`git` round trip | — |
 | Keys | keyring, passphrase provider, session, identity keypair/encoding, recipient wrap/unwrap, rotation, recovery export/import | — |
-| Tooling | CLI (`init`/`init --pad-to`/`install`/`protect`/`unlock`/`lock`/`status`/`status --json`/`identity`/`key add-recipient`/`key remove-recipient`/`key rotate`/`reencrypt`/`key export-recovery`/`key import-recovery`/`verify`/`verify --access`/`verify --history`/`verify --json`/`clean`/`smudge`/`textconv`/`merge`/`encrypt`/`decrypt`/`inspect`/`inspect --json`/`filter-process`) | — |
+| Tooling | CLI (`init`/`init --pad-to`/`install`/`protect`/`unprotect`/`unlock`/`lock`/`status`/`status --json`/`identity`/`key add-recipient`/`key remove-recipient`/`key rotate`/`reencrypt`/`key export-recovery`/`key import-recovery`/`verify`/`verify --access`/`verify --history`/`verify --json`/`clean`/`smudge`/`textconv`/`merge`/`encrypt`/`decrypt`/`inspect`/`inspect --json`/`filter-process`) | — |
 
 Ten things worth knowing before reading any spec here. The first three are the
 load-bearing ones; the last two are about scope.

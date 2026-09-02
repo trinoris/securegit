@@ -7,8 +7,10 @@ tool which is sometimes a Git filter and sometimes a human interface from
 confusing the two.
 
 **Status: MOSTLY IMPLEMENTED.** `src/cli.ts` covers every command below
-except `unprotect` and `key add-provider`/`remove-provider`/`list`/
-`list-recipients`. `verify` now covers its base form, `--history`, and
+except `key add-provider`/`remove-provider`/`list`/`list-recipients`.
+`unprotect` is implemented ([02](02-git-integration.md)) — `.gitattributes`
+only, `.gitignore` residue entries untouched, forward-only exactly like key
+rotation. `verify` now covers its base form, `--history`, and
 `--access`. `--json` is implemented too, for every command that currently
 exists and produces a report — `status`, `verify` (all three forms), and
 `inspect` — writing the underlying report object straight to stdout via
@@ -34,7 +36,13 @@ implemented too, on `src/pktline.ts`/`src/process.ts` — it doesn't fit
 `CliIO`'s single-shot, whole-buffer contract (a long-running stream can't be
 one `stdin` buffer and one `runCli()` return), so it gets its own entrypoint,
 `runFilterProcess`, called directly from `bin/securegit.ts` before either
-`readStdin()` or `runCli()` runs.
+`readStdin()` or `runCli()` runs. `--repo <path>` is implemented too:
+`runCli` parses and strips it from `argv` once, before dispatch — not
+threaded through the ~30 places in `cli.ts` that read `io.cwd` individually
+— by reassigning its own `io` parameter to a derived object with `cwd`
+resolved (`node:path`'s `resolve`, so a relative path works) and the flag
+removed from `argv`. Every existing command case picks up the override for
+free, since none of them changes.
 
 ## Core Principle
 
@@ -52,8 +60,8 @@ one `stdin` buffer and one `runCli()` return), so it gets its own entrypoint,
 | `securegit init [--bind-path] [--pad-to <n>]` | Create `.securegit/config.json`, generate `repoId`, generation 1. Refuses outside a repository, or if already initialised. `--pad-to` ([14](14-metadata-leakage.md)) sets `padTo`, a non-negative integer, `0` (disabled) by default; refused if negative or non-numeric. Like `--bind-path`, immutable after `init` — there is no update command for either. |
 | `securegit install [--process] [--no-required] [--bin <cmd>]` | Write `.git/config` filter, diff and merge driver entries ([02](02-git-integration.md), [12](12-diff-merge.md)). Idempotent. `--bin` overrides the command Git invokes (default: the resolved `securegit` on `PATH`) — for a global install where `securegit` is not literally the right invocation on every machine (e.g. `node /path/to/securegit.js`, or a version-pinned wrapper), and for the integration test suite, which cannot assume `securegit` is on `PATH` for a binary that was just built. Not meant to be reached for by a normal user. |
 | `securegit protect <pattern>…` | Add patterns to `.gitattributes` with `filter`, `diff`, `merge` and `-text`, keeping the `.securegit/**` exclusion last. |
-| `securegit unprotect <pattern>…` | Remove patterns. Warns that already-committed blobs stay encrypted until re-committed. |
-| `securegit status [--json]` | The diagnostic report in [07](07-unlock-session.md). `--json`: `{repository, repoId, bindPath, padTo, locked, generation, metadata}` to stdout — `metadata` is [14](14-metadata-leakage.md)'s M1–M12 report; the human-readable form prints `padTo` alongside `bindPath` and points at `status --json` for the M1–M12 detail rather than repeating twelve mostly-static lines. |
+| `securegit unprotect <pattern>…` | Remove patterns from `.gitattributes` only — `.gitignore`'s residue entries are left alone. Warns that already-committed blobs stay encrypted until re-committed. A pattern that was never protected is a silent no-op (exit 0), and doesn't touch the file. |
+| `securegit status [--json]` | The diagnostic report in [07](07-unlock-session.md). `--json`: `{repository, repoId, bindPath, padTo, locked, generation, metadata, recoveryPaths}` to stdout — `metadata` is [14](14-metadata-leakage.md)'s M1–M12 report, `recoveryPaths` is [13](13-verify.md)'s single-recovery-path advisory (`{paths, hasExport, warn}`, or `null` with no local keyring); the human-readable form prints `padTo` alongside `bindPath`, a pointer to `status --json` for the M1–M12 detail, and a `⚠` line when `recoveryPaths.warn` is true. |
 | `securegit verify [--history\|--access] [--json]` | The audit in [13](13-verify.md). Implemented: the base form (config + index checks, leak/advice scan), `--history` (a real commit walk — CI-tier speed, not pre-commit), `--access` (who can read this repository), and `--json` for all three. |
 | `securegit reencrypt [--paths <pathspec>] [--dry-run]` | Move protected files to the current generation ([09](09-rotation-recovery.md)). Stages via plumbing — never writes the worktree file. `--paths` is a prefix match, not full git pathspec syntax. |
 
@@ -80,7 +88,7 @@ one `stdin` buffer and one `runCli()` return), so it gets its own entrypoint,
 |---|---|
 | `securegit key init` | Generate generation 1 and wrap it. Implied by `init`. |
 | `securegit key list` | Generations, fingerprints, dates, current marker. |
-| `securegit key rotate [--bind-path]` | Add a generation ([09](09-rotation-recovery.md)); wraps it for every provider and every existing recipient. Refuses a dirty working tree or a locked repository (locked is checked first). `--bind-path` refuses (exit 4) — not implemented, since `config.ts` has no primitive to update an already-initialised repository's `bindPath`. |
+| `securegit key rotate [--bind-path] --confirm-recipients <n>` | Add a generation ([09](09-rotation-recovery.md)); wraps it for every provider and every existing recipient. Refuses a dirty working tree, a locked repository (locked is checked first), or a missing/mismatched `--confirm-recipients <n>` — printing the recipient list either way, checked before the dirty-tree refusal. `--bind-path` refuses (exit 4) — not implemented, since `config.ts` has no primitive to update an already-initialised repository's `bindPath`. |
 | `securegit key add-provider <id>` | Wrap every generation with an additional provider. |
 | `securegit key remove-provider <id>` | Refused if it is the last non-custodial provider. |
 | `securegit key add-recipient <pubkey> [--label <label>]` | Wraps every generation the caller currently holds for a recipient's public key ([08](08-multi-recipient.md)), writes `.securegit/recipients/<fingerprint>.json`. Refuses a malformed public key or a locked repository. `addedBy` is the caller's own identity fingerprint if `identity init` has been run locally, else blank — not an error, since the caller may only have direct keyring access. |
@@ -159,7 +167,7 @@ English.
 
 | Flag | Effect |
 |---|---|
-| `--repo <path>` | Operate on a repository other than the current directory. |
+| `--repo <path>` | Operate on a repository other than the current directory. Resolved against `cwd` (relative paths work), and stripped from `argv` before per-command parsing so a path value is never mistaken for a positional argument. Can appear before or after the command name. Missing its path argument exits 4. |
 | `--strict` | `smudge` fails rather than passing ciphertext through ([07](07-unlock-session.md)). |
 | `--json` | Machine-readable output for `status`, `verify` (all three forms), and `inspect` — the report object itself, `JSON.stringify`'d, straight to stdout. `key list`/`list-recipients` don't exist yet, so `--json` has nothing to do for them. |
 | `--quiet` | Suppress non-error stderr output. |
@@ -250,8 +258,14 @@ it, don't exist yet).
 | A key object interpolated into a string yields `[redacted]` | `src/crypto.test.ts` | — | ✅ |
 | Error messages name the offending path | `src/cli.test.ts` | — | ✅ |
 | No error message contains plaintext bytes | `src/cli.test.ts` | `blobs/` | 🔲 |
-| `--repo` operates on the named repository | `src/cli.test.ts` | — | 🔲 |
+| `--repo` operates on the named repository, before or after the command, relative paths resolve against `cwd` | `src/cli.test.ts` | — | ✅ |
+| `--repo` with no path argument exits 4 | `src/cli.test.ts` | — | ✅ |
 | `protect` keeps the `.securegit/**` exclusion last | `src/install.test.ts` | — | ✅ |
+| `unprotect` removes the pattern, keeping the exclusion line | `src/install.test.ts` | — | ✅ |
+| `unprotect` removes only the named pattern, leaving others intact | `src/install.test.ts` | — | ✅ |
+| `unprotect` is a silent no-op for a pattern that was never protected, and doesn't touch a nonexistent `.gitattributes` | `src/install.test.ts` | — | ✅ |
+| `unprotect` does not touch `.gitignore` residue entries | `src/install.test.ts` | — | ✅ |
+| `securegit unprotect` warns that already-committed blobs stay encrypted | `src/cli.test.ts` | — | ✅ |
 | `install --bin` points the filter at an unpublished build | `src/cli.test.ts` | — | ✅ |
 | `verify` exits misconfigured (2) before `init`, and 0 on a correctly configured repository | `src/cli.test.ts` | — | ✅ |
 | `verify` exits leaked (5) and writes nothing to stdout | `src/cli.test.ts` | — | ✅ |
@@ -266,7 +280,7 @@ it, don't exist yet).
 | `key remove-recipient` deletes the file, exits usage (4) if it never existed | `src/cli.test.ts` | — | ✅ |
 | End-to-end: a second identity joins via `add-recipient`, `unlock`s with no local keyring, and decrypts | `src/cli.test.ts` | — | ✅ |
 | `unlock` names both `init` and `identity init` when neither a keyring nor an identity exists | `src/cli.test.ts` | — | ✅ |
-| `key rotate` refuses `--bind-path`, a dirty tree, and a locked repository (locked checked first) | `src/cli.test.ts` | — | ✅ |
+| `key rotate` refuses `--bind-path`, a dirty tree, a locked repository, and a missing/mismatched `--confirm-recipients` (locked checked first) | `src/cli.test.ts` | — | ✅ |
 | `key rotate` invalidates the session and rewraps every existing recipient | `src/cli.test.ts` | — | ✅ |
 | `reencrypt` stages a re-encrypted blob without touching the worktree file; `--dry-run` stages nothing; a no-op once current | `src/cli.test.ts` | — | ✅ |
 | `key export-recovery` requires `--out`, exits locked without an unlocked session, prints the code to stderr only | `src/cli.test.ts` | — | ✅ |

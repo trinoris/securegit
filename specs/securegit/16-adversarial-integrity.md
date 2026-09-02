@@ -6,11 +6,12 @@ The threat model in [01](01-threat-model.md) names the adversaries. This spec
 works through what they actually do, in order of how likely it is to happen to
 somebody using this tool in 2026.
 
-**Status: MOSTLY IMPLEMENTED for the v1-marked mitigations.** T3, T10, T12
-and T13 are done and tested; T1's `verify` detector and T7/T8's key-material
-hardening were already built as part of earlier specs and are cross-checked
-here. What's still open needs specs 08/09 (T5) or spec 11 (part of T13) —
-see the Test Cases table.
+**Status: MOSTLY IMPLEMENTED for the v1-marked mitigations.** T3, T5, T10
+and T12 are done and tested; T1's `verify` detector and T7/T8's
+key-material hardening were already built as part of earlier specs and are
+cross-checked here. T13's `filter-process` bounds-in-flight-bytes row has
+no dedicated test yet, though `filter-process` itself is built (spec 11).
+See the Test Cases table.
 
 ## The thesis
 
@@ -92,6 +93,32 @@ attacker nothing until the next `key rotate` wraps the new generation for them.
 - `key rotate` prints the recipient list and requires confirmation of the count.
 - `addedBy` records the identity that performed the addition.
 - Signed commits make the addition attributable.
+
+As built, `key rotate`'s confirmation is `--confirm-recipients <n>`, not a
+blind `--yes` — it has to name the *count* the operator expects, checked
+against the actual number of recipient files, so a mismatch (one added or
+removed since they last looked) is caught before anything rewraps, not
+just acknowledged as a formality. Without it, `key rotate` refuses (exit 4)
+and prints the fingerprint and label of every current recipient — cheap to
+show, since recipient files are public and committed regardless of lock
+state — so the operator has the actual list in front of them, not just a
+number, before typing the count back. Checked in `cmdKeyRotate`
+(`src/cli.ts`) right after the locked check and before the dirty-tree
+check: both are preconditions to *doing* the rotation, and neither needs a
+clean working tree or an unlocked repository to evaluate.
+
+`verify --access` naming the commit is built too: `AccessRecipient` gained
+`addedCommit: string | null` (`accessReport()`, `src/verify.ts`), resolved
+via `git log --diff-filter=A --format=%h -- <path>` against the recipient
+file's own repo-relative path — `git log` lists newest first, so the
+*last* line of that output is the oldest add, correct even for a recipient
+who was removed and re-added later (a real, if unusual, scenario: same
+fingerprint, same filename, a second `A` entry in the file's history).
+`null`, not an error, when the file was never committed at all — the
+common state right after `key add-recipient`, which deliberately doesn't
+commit its own output — or the repository has no commits yet. Surfaced in
+both `verify --access`'s human-readable line (`commit <sha>` or `commit
+(uncommitted)`) and its `--json` form.
 
 ## T6 — recovery theft
 
@@ -206,8 +233,8 @@ requests ([11](11-filter-process.md)).
 | T1: downgrade already in history is found by `verify --history` | `src/verify.test.ts` | — | ✅ |
 | T3: relocated blob fails under `bindPath = true` | `src/envelope.test.ts` | — | ✅ |
 | T3: relocated blob decrypts under `bindPath = false`, as documented | `src/envelope.test.ts` | — | ✅ |
-| T5: `verify --access` names the commit that added each recipient | `src/verify.test.ts` | `identities/` | 🔲 |
-| T5: `rotate` requires confirmation of the recipient count | `src/cli.test.ts` | — | 🔲 |
+| T5: `verify --access` names the commit that added each recipient | `src/verify.test.ts` | — | ✅ |
+| T5: `rotate` requires confirmation of the recipient count | `src/cli.test.ts` | — | ✅ |
 | T6: the recovery file alone does not decrypt without the code | `src/recovery.test.ts` | — | ✅ |
 | T6: an export appends to the committed recovery log, not the code or file | `src/recovery.test.ts` | — | ✅ |
 | T7: session file with loose permissions is deleted, not used | `src/session.test.ts` | — | ✅ |

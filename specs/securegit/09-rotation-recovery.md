@@ -13,12 +13,12 @@ export/import recovery file, the recovery code's format/parse/checksum, and
 the recovery log — is built and tested at both the module level and, now,
 end-to-end through the CLI, giving [16](16-adversarial-integrity.md)'s T6
 (recovery theft) a real mitigation to test against, where none existed
-before. Not built: the recipient-count confirmation prompt T5 asks for
-(`rotate` prints the recipient list and requires the operator to confirm the
-count before proceeding — not built, only the dirty-tree/locked refusals
-are); and [15](15-failure-modes.md)'s F13 (concurrent rotate and add), which
-needs a real race, not just the commands existing. See "What this pass
-actually built" below.
+before. `rotate` now also requires the recipient-count confirmation T5 asks
+for — `--confirm-recipients <n>`, checked before the dirty-tree/locked
+refusals hand off to the actual rotation. Not built:
+[15](15-failure-modes.md)'s F13 (concurrent rotate and add), which needs a
+real race, not just the commands existing. See "What this pass actually
+built" below.
 
 ## Core Principle
 
@@ -213,6 +213,18 @@ reuse rather than duplicate.
   since the status check itself can't complete. `cmdKeyRotate` checks
   `loadKeys().current()` first for exactly this reason; the ordering is load
   bearing, not stylistic.
+- **The recipient-count confirmation (`--confirm-recipients <n>`) is loaded
+  and checked right after the locked check, before the dirty-tree check —
+  not after rotation, where the old version only used the recipient list to
+  decide what to rewrap.** Recipient files are read once, into memory, for
+  both purposes: the confirmation gate compares `recipientEntries.length`
+  against the operator's claimed count, and — once confirmed — the exact
+  same in-memory list is what gets rewrapped, so there is no window where
+  the set could change between "here's who I'm about to affect" and "here's
+  who I actually affected." Named `--confirm-recipients`, not a bare
+  `--yes`, deliberately: it has to catch a genuine mismatch (someone added
+  or removed since the operator last looked), not just acknowledge a
+  warning was shown.
 - **`--bind-path` is refused, not silently ignored.** `config.ts` has no
   function to update an already-initialised repository's `bindPath` — only
   `initConfig` sets it, once, at `init`. Silently ignoring the flag would be
@@ -339,6 +351,8 @@ that is out of scope for this pass.
 | `rotate` refuses `--bind-path` (not implemented) | `src/cli.test.ts` | — | ✅ |
 | `rotate` refuses on a dirty working tree | `src/cli.test.ts` | `repo-protected/` | ✅ |
 | `rotate` refuses when locked (checked before the dirty-tree check) | `src/cli.test.ts` | — | ✅ |
+| `rotate` refuses without `--confirm-recipients`, printing the recipient list | `src/cli.test.ts` | — | ✅ |
+| `rotate` refuses a `--confirm-recipients` count that does not match reality | `src/cli.test.ts` | — | ✅ |
 | `rotate` wraps the new generation for every provider | `src/keyring.test.ts` | — | ✅ |
 | `rotate` wraps the new generation for every recipient | `src/cli.test.ts` | — | ✅ |
 | `rotate` invalidates the session | `src/cli.test.ts` | — | ✅ |
@@ -372,5 +386,8 @@ that is out of scope for this pass.
 - [05](05-key-hierarchy.md) — generations and why old ones are kept
 - [06](06-key-provider-port.md) — the `recovery-code` provider
 - [08](08-multi-recipient.md) — removal requires rotation to mean anything
-- [13](13-verify.md) — the "who can read this" report and its blind spot
+- [13](13-verify.md) — the "who can read this" report and its blind spot;
+  also `recoveryPathStatus()`, the single-recovery-path advisory both
+  `verify` and `status` now surface — fewer than two independent paths to
+  the current generation, and no export on record
 - [16](16-adversarial-integrity.md) — theft of a recovery file

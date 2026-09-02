@@ -216,3 +216,33 @@ export async function protect(
     await updateGitignore(repoDir, patterns);
   }
 }
+
+/**
+ * Removes patterns previously added by `protect` — the `.gitattributes`
+ * line only. `.gitignore`'s residue entries are left alone: harmless once
+ * a pattern is unprotected, and removing them could unhide files a user
+ * still wants ignored for reasons that have nothing to do with this tool.
+ *
+ * This changes what happens to the *next* commit under the pattern, not
+ * anything already committed — the same forward-only shape as key rotation
+ * (09-rotation-recovery.md). A blob already committed as ciphertext stays
+ * ciphertext, in history and in the current index, until something
+ * actually re-stages the file; `clean` only ever runs when Git decides a
+ * path needs re-verifying (02-git-integration.md), and removing an
+ * attribute alone doesn't trigger that.
+ *
+ * A pattern that was never protected, or a call before `.gitattributes`
+ * exists at all, is a silent no-op — the file is left exactly as it was
+ * (not touched, not created empty) rather than written unconditionally.
+ */
+export async function unprotect(repoDir: string, patterns: string[]): Promise<void> {
+  if (patterns.length === 0) {
+    throw new InstallError('unprotect requires at least one pattern');
+  }
+  const path = join(repoDir, '.gitattributes');
+  const existing = await readLines(path);
+  const toRemove = new Set(patterns);
+  const remaining = existing.filter((line) => !toRemove.has(line.split(/\s+/)[0]!));
+  if (remaining.length === existing.length) return; // nothing matched
+  await writeLines(path, remaining);
+}

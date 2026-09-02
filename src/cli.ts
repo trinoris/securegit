@@ -11,11 +11,11 @@ import { execFile as execFileCb } from 'node:child_process';
 import { promisify } from 'node:util';
 import { readFile, readdir, writeFile, unlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { keyFingerprint } from './crypto.js';
 import { ConfigError, initConfig, readConfig, resolveKeyringPath, type RepoConfig } from './config.js';
-import { InstallError, install, protect } from './install.js';
+import { InstallError, install, protect, unprotect } from './install.js';
 import {
   KeyringError,
   createKeyring,
@@ -36,6 +36,7 @@ import {
   accessReport,
   historyReport,
   metadataReport,
+  recoveryPathStatus,
   TEXTCONV_NOTES_REF,
   checkAttr,
   listTrackedPaths,
@@ -107,7 +108,7 @@ export interface CliIO {
 }
 
 const USAGE =
-  'usage: securegit <init|install|protect|unlock|lock|status|identity|key|verify|reencrypt|clean|smudge|textconv|merge|encrypt|decrypt|inspect|filter-process> ...';
+  'usage: securegit <init|install|protect|unprotect|unlock|lock|status|identity|key|verify|reencrypt|clean|smudge|textconv|merge|encrypt|decrypt|inspect|filter-process> ...';
 
 function resolvePassphrase(io: CliIO): string {
   const fromEnv = io.env.SECUREGIT_PASSPHRASE;
@@ -224,6 +225,27 @@ async function cmdProtect(args: string[], io: CliIO): Promise<number> {
     return EXIT_USAGE;
   }
   io.stderr(`securegit: protecting ${patterns.join(', ')}`);
+  return EXIT_OK;
+}
+
+async function cmdUnprotect(args: string[], io: CliIO): Promise<number> {
+  const patterns = args.filter((a) => !a.startsWith('--'));
+  if (patterns.length === 0) {
+    io.stderr('securegit: unprotect requires at least one pattern');
+    return EXIT_USAGE;
+  }
+  try {
+    await unprotect(io.cwd, patterns);
+  } catch (e) {
+    io.stderr((e as Error).message);
+    return EXIT_USAGE;
+  }
+  io.stderr(
+    `securegit: no longer protecting ${patterns.join(', ')}\n` +
+      '  warning: blobs already committed under this pattern stay encrypted — this only\n' +
+      '           changes what happens the next time the file is edited and re-added\n' +
+      '  action: git add .gitattributes && git commit',
+  );
   return EXIT_OK;
 }
 
@@ -372,6 +394,7 @@ async function cmdStatus(args: string[], io: CliIO): Promise<number> {
   const loaded = await loadKeys(io);
   if (!loaded.ok) return loaded.code;
   const current = loaded.keys.current();
+  const recovery = await recoveryPathStatus({ repoDir: io.cwd, home: io.home });
 
   if (args.includes('--json')) {
     const metadata = await metadataReport({ repoDir: io.cwd });
@@ -383,6 +406,7 @@ async function cmdStatus(args: string[], io: CliIO): Promise<number> {
       locked: current === null,
       generation: current ? current.keyId : null,
       metadata,
+      recoveryPaths: recovery,
     });
     return current ? EXIT_OK : EXIT_LOCKED;
   }
@@ -393,7 +417,10 @@ async function cmdStatus(args: string[], io: CliIO): Promise<number> {
       `bindPath     ${loaded.config.bindPath}\n` +
       `padTo        ${loaded.config.padTo}\n` +
       `session      ${current ? `unlocked, generation ${current.keyId}` : 'locked'}\n` +
-      `metadata     M1–M12 (14-metadata-leakage.md): securegit status --json`,
+      `metadata     M1–M12 (14-metadata-leakage.md): securegit status --json` +
+      (recovery?.warn
+        ? `\nrecovery     ⚠ only ${recovery.paths} recovery path${recovery.paths === 1 ? '' : 's'}, no export on record — see 09-rotation-recovery.md`
+        : ''),
   );
   return current ? EXIT_OK : EXIT_LOCKED;
 }
@@ -597,6 +624,39 @@ async function cmdKeyRotate(args: string[], io: CliIO): Promise<number> {
     return EXIT_LOCKED;
   }
 
+  // Load recipients once, here — reused both for the confirmation gate and
+  // (once confirmed) the rewrap loop below, so a recipient someone forgot
+  // was added or removed since they last checked is caught before anything
+  // is actually rotated, not discovered afterward in the rewrap count.
+  let recipientEntries: { path: string; recipient: RecipientFile }[] = [];
+  try {
+    const files = (await readdir(recipientsDir(io.cwd))).filter((f) => f.endsWith('.json'));
+    for (const entry of files) {
+      const path = recipientPath(io.cwd, entry.replace(/\.json$/, ''));
+      recipientEntries.push({ path, recipient: await readRecipientFile(path) });
+    }
+  } catch {
+    // no recipients directory — nothing to confirm or rewrap
+  }
+
+  const confirmIdx = args.indexOf('--confirm-recipients');
+  const confirmArg = confirmIdx !== -1 ? args[confirmIdx + 1] : undefined;
+  const confirmed = confirmArg !== undefined ? Number(confirmArg) : undefined;
+  if (confirmed === undefined || !Number.isInteger(confirmed) || confirmed !== recipientEntries.length) {
+    const list =
+      recipientEntries.length > 0
+        ? recipientEntries
+            .map(({ recipient: r }) => `  ${r.fingerprint}${r.label ? ` (${r.label})` : ''}`)
+            .join('\n')
+        : '  (none)';
+    io.stderr(
+      `securegit: rotate will rewrap the new generation for ${recipientEntries.length} ` +
+        `recipient${recipientEntries.length === 1 ? '' : 's'}\n${list}\n` +
+        `  action: re-run with --confirm-recipients ${recipientEntries.length} to proceed`,
+    );
+    return EXIT_USAGE;
+  }
+
   let statusOutput: string;
   try {
     // The spawned `git` needs to see this CliIO's own `home`, explicitly,
@@ -636,15 +696,7 @@ async function cmdKeyRotate(args: string[], io: CliIO): Promise<number> {
   const newFingerprint = keyFingerprint(rotated.rmk);
 
   let rewrapped = 0;
-  let entries: string[] = [];
-  try {
-    entries = (await readdir(recipientsDir(io.cwd))).filter((f) => f.endsWith('.json'));
-  } catch {
-    // no recipients directory — nothing to rewrap
-  }
-  for (const entry of entries) {
-    const path = recipientPath(io.cwd, entry.replace(/\.json$/, ''));
-    const recipient = await readRecipientFile(path);
+  for (const { path, recipient } of recipientEntries) {
     const recipientPublicKey = decodePublicKey(recipient.publicKey);
     recipient.keys[String(newGeneration)] = wrapForRecipient({
       recipientPublicKey,
@@ -986,7 +1038,7 @@ async function cmdVerifyAccess(args: string[], io: CliIO): Promise<number> {
   for (const r of report.recipients) {
     lines.push(
       `  ${r.fingerprint}  ${r.label}  added ${isoDate(r.addedAt)} by ${r.addedBy || '(unknown)'}  ` +
-        formatGenerationRange(r.generations),
+        `commit ${r.addedCommit ?? '(uncommitted)'}  ${formatGenerationRange(r.generations)}`,
     );
   }
 
@@ -1476,6 +1528,26 @@ export async function runFilterProcess(io: FilterProcessIO): Promise<number> {
 // ---------------------------------------------------------------------------
 
 export async function runCli(io: CliIO): Promise<number> {
+  // `--repo <path>` is global — it can appear anywhere in argv, before or
+  // after the command name — so it's parsed and stripped here, once,
+  // before dispatch, rather than threaded through every one of the ~30
+  // places in this file that read `io.cwd` individually. Reassigning `io`
+  // (not introducing a second variable) means every existing case below
+  // picks up the resolved path for free.
+  const repoIdx = io.argv.indexOf('--repo');
+  if (repoIdx !== -1) {
+    const repoArg = io.argv[repoIdx + 1];
+    if (repoArg === undefined) {
+      io.stderr('securegit: --repo requires a path argument');
+      return EXIT_USAGE;
+    }
+    io = {
+      ...io,
+      cwd: resolve(io.cwd, repoArg),
+      argv: [...io.argv.slice(0, repoIdx), ...io.argv.slice(repoIdx + 2)],
+    };
+  }
+
   const [cmd, ...rest] = io.argv;
   try {
     switch (cmd) {
@@ -1485,6 +1557,8 @@ export async function runCli(io: CliIO): Promise<number> {
         return await cmdInstall(rest, io);
       case 'protect':
         return await cmdProtect(rest, io);
+      case 'unprotect':
+        return await cmdUnprotect(rest, io);
       case 'unlock':
         return await cmdUnlock(rest, io);
       case 'lock':

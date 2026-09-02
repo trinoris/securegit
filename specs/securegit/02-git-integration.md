@@ -7,9 +7,15 @@ which of Git's own conversions have to be switched off for the scheme to be
 correct rather than merely usually-correct.
 
 **Status: IMPLEMENTED.** `src/filter.ts` (`clean`/`smudge`/`textconv`) and
-`src/install.ts` (`install`/`protect`, writing the real `.git/config` and
-`.gitattributes` entries described below) are both built and tested against
-a real `git` binary.
+`src/install.ts` (`install`/`protect`/`unprotect`, writing the real
+`.git/config` and `.gitattributes` entries described below) are both built
+and tested against a real `git` binary. `unprotect` removes only the
+`.gitattributes` line — never `.gitignore`'s residue entries, which stay
+harmless once a pattern is unprotected and could unhide files a user still
+wants ignored for unrelated reasons — and, like key rotation
+([09](09-rotation-recovery.md)), is forward-only: a blob already committed
+as ciphertext stays ciphertext, in history and in the current index, until
+something actually re-stages the file.
 
 ## Core Principle
 

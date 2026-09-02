@@ -9,11 +9,12 @@ still configured to prevent it".
 
 **Status: IMPLEMENTED.** `src/verify.ts` implements the always-on
 configuration and index checks (L1–L3, L7–L10), the leak/advice content scan,
-`--access` (`accessReport()`), and `--history` (`historyReport()`) — all
-wired into `src/cli.ts` as `securegit verify [--access|--history] [--json]`.
-`--json` is built for all three forms: the report object itself, exactly as
-the module returns it, `JSON.stringify`'d to stdout. See "What this pass
-actually built" below.
+`--access` (`accessReport()`), `--history` (`historyReport()`), and the
+single-recovery-path advisory (`recoveryPathStatus()`, also surfaced
+directly by `securegit status`) — all wired into `src/cli.ts` as
+`securegit verify [--access|--history] [--json]`. `--json` is built for all
+three forms: the report object itself, exactly as the module returns it,
+`JSON.stringify`'d to stdout. See "What this pass actually built" below.
 
 ## Core Principle
 
@@ -71,7 +72,8 @@ protected path, read the blob and require the envelope magic.
      matched by no pattern, but resembles a protected file
 ```
 
-Three distinct findings come out of `verify` (`FindingKind`: `'leak' | 'advice' | 'residue'`):
+Four distinct findings come out of `verify`
+(`FindingKind`: `'leak' | 'advice' | 'residue' | 'recovery'`):
 
 - **Leak** — the path *is* protected by an attribute and its blob is plaintext.
   Exit code 5. This is a live failure of L1–L4.
@@ -87,6 +89,14 @@ Three distinct findings come out of `verify` (`FindingKind`: `'leak' | 'advice' 
   `.gitignore` would otherwise hide from view — plaintext that was never
   committed is still plaintext sitting on disk. Exit code 2 (the
   misconfigured tier): real, but not the same severity as a committed leak.
+- **Recovery** ([09](09-rotation-recovery.md), [15](15-failure-modes.md)) —
+  fewer than two independent paths can unwrap the current generation (the
+  local keyring plus every recipient covering it), and no recovery export
+  is on record. Exit code 0 — advice-tier, the same as **Advice**: real
+  and worth acting on, but not evidence anything has actually leaked.
+  `path` is the literal string `(repository)`, since this is a property of
+  the repository as a whole, not any one file — the only `Finding` this is
+  true for.
 
 ### History — `--history`
 
@@ -267,6 +277,19 @@ Scope decisions made building it, and why:
   base `verify` form**: a `PassphraseFileProvider` is never even constructed
   for it, since `accessReport()` reads the keyring's `provider` field
   directly rather than calling `describe()` on anything.
+- **`AccessRecipient.addedCommit` is the one field in `accessReport()` that
+  spawns `git`** (T5, [16](16-adversarial-integrity.md)) — everything else
+  in this report is a plain filesystem read. `git log --diff-filter=A
+  --format=%h -- <path>` against the recipient file's own repo-relative
+  path, and the *last* line of that (newest-first) output, not the first —
+  the oldest add is the one that matters, correct even across a
+  removed-then-re-added recipient sharing the same fingerprint and
+  filename. `null`, not a thrown error, both for a file that was never
+  committed (the ordinary state right after `key add-recipient`, which
+  deliberately doesn't commit) and for a repository with no commits yet —
+  `git log` itself fails closed in that case, and the `try`/`catch` here
+  treats that identically to "never committed" rather than surfacing it as
+  a different error shape.
 - **`securegit verify` is now wired into `src/cli.ts`.** `cmdVerify` needs no
   passphrase or session — it constructs a `PassphraseFileProvider` purely to
   call `describe()` for the L10 check, never `unwrap()` — prints each check
@@ -286,6 +309,29 @@ Scope decisions made building it, and why:
   is checked in each of `cmdVerify`/`cmdVerifyAccess`/`cmdVerifyHistory`
   (`cli.ts`) independently, since which mode is active is decided first —
   a caller can combine `--access --json` or `--history --json` freely.
+- **`recoveryPathStatus()` is independently callable, not folded into
+  `verify()`'s own scan.** `securegit status` needs this same answer
+  ("would losing this machine lose the repository") without paying for
+  `verify()`'s full tracked-file content scan — `status` is documented
+  elsewhere (07-unlock-session.md) as a cheap, session-only read, and
+  should stay that way. `verify()` calls the standalone function too
+  (one extra keyring read, accepted as cheap) rather than duplicating the
+  path-counting logic inline.
+- **"Paths" counts the local keyring (if the current generation has any
+  wrapped provider slot) plus every recipient file whose `keys` object
+  covers the current generation specifically** — a recipient who joined
+  before the latest rotation and was never rewrapped for it does not count,
+  even though their file exists. Returns `null`, not a false "0 paths",
+  when there is no local keyring to determine "the current generation"
+  from at all (a machine that joined purely via a recipient file has no
+  authoritative answer to that on its own — 08-multi-recipient.md).
+- **The threshold is `paths < 2`, not `paths === 0`.** A solo repository —
+  by far the most common case, and the default state of every freshly
+  `init`ed repository in this test suite — has exactly one path (the local
+  keyring) and no export, so it warns by default. This is the intended
+  behavior, not a false positive to suppress: existing `verify()` tests
+  that asserted `findings: []` for a fresh solo repo were updated to expect
+  this finding once it landed, not the other way around.
 
 ## Test Cases
 
@@ -302,6 +348,15 @@ Scope decisions made building it, and why:
 | `text` on a protected path is reported (L8) | `src/verify.test.ts` | `attributes/` | ✅ |
 | Keyring inside the worktree is reported (L9) | `src/verify.test.ts` | — | ✅ |
 | Custodial-only provider set is reported (L10) | `src/verify.test.ts` | — | ✅ |
+| `recoveryPathStatus()` reports 1 path, no export, warns — for a fresh solo repo | `src/verify.test.ts` | — | ✅ |
+| A recipient covering the current generation counts as a second path, and the warning stops | `src/verify.test.ts` | — | ✅ |
+| A recipient file not covering the current generation does not count as a path | `src/verify.test.ts` | — | ✅ |
+| An existing recovery export stops the warning, even with just the local keyring | `src/verify.test.ts` | — | ✅ |
+| Returns `null` with no local keyring to determine "current" from | `src/verify.test.ts` | — | ✅ |
+| `verify()`'s recovery finding is present for a solo repo, absent once a second path exists | `src/verify.test.ts` | — | ✅ |
+| The recovery finding is advice-tier — exit code stays 0 | `src/verify.test.ts` | — | ✅ |
+| `status` warns about a single recovery path in both the human and `--json` forms | `src/cli.test.ts` | — | ✅ |
+| `status` stops warning once a second recipient covers the current generation | `src/cli.test.ts` | — | ✅ |
 | `historyReport()` finds plaintext committed on a branch unreachable from HEAD | `src/verify.test.ts` | — | ✅ |
 | `historyReport()` resolves attributes as of each commit (both directions) | `src/verify.test.ts` | — | ✅ |
 | `historyReport()` does not flag a file that predates protection | `src/verify.test.ts` | — | ✅ |
@@ -314,6 +369,10 @@ Scope decisions made building it, and why:
 | Leak exits 5; advice exits 0; misconfiguration exits 2 | `src/verify.test.ts` | — | ✅ |
 | `accessReport()` reports one provider covering the current generation for a plain solo repo | `src/verify.test.ts` | — | ✅ |
 | `accessReport()` lists a recipient with the generations their file actually covers | `src/verify.test.ts` | — | ✅ |
+| `accessReport()` reports `addedCommit: null` for an uncommitted recipient file | `src/verify.test.ts` | — | ✅ |
+| `accessReport()` names the oldest commit that added a recipient file, once committed | `src/verify.test.ts` | — | ✅ |
+| `accessReport()` names the oldest add when a recipient was removed and re-added | `src/verify.test.ts` | — | ✅ |
+| `verify --access` shows `commit <sha>`/`commit (uncommitted)` in both forms | `src/cli.test.ts` | — | ✅ |
 | `accessReport()` providers section reflects coverage across a rotation | `src/verify.test.ts` | — | ✅ |
 | `accessReport()` providers section is empty, not an error, with no local keyring | `src/verify.test.ts` | — | ✅ |
 | `accessReport()` lists recovery exports from the committed log | `src/verify.test.ts` | — | ✅ |

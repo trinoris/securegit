@@ -200,8 +200,8 @@ Messages go to stderr in every case ([10](10-cli-contract.md)), including
 | F18: CRLF-mangled envelope reports corruption, not a wrong key | `src/failure.test.ts` | — | ✅ |
 | F19: foreign keyring is rejected by `repoId`, with both ids named | `src/keyring.test.ts` | — | ✅ |
 | F21: a locked repository with the filter attached cannot `git pull` | `src/git.integration.test.ts` | — | ✅ |
-| `status` warns while there is only one recovery path | `src/cli.test.ts` | — | 🔲 (blocked: recovery export is spec 09, not built) |
-| `verify` reports single-recipient, no-export as a finding | `src/verify.test.ts` | — | 🔲 (blocked: recovery export is spec 09, not built — recipients themselves are spec 08, now built) |
+| `status` warns while there is only one recovery path | `src/cli.test.ts` | — | ✅ |
+| `verify` reports a single recovery path, no export, as a finding | `src/verify.test.ts` | — | ✅ |
 | No failure path writes plaintext to the object database | `src/git.integration.test.ts` | `repo-protected/` | 🔲 |
 
 ## Relationship to Other Specs

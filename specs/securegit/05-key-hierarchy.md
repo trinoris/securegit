@@ -7,7 +7,14 @@ Every key in the system, where it comes from, and what it is allowed to touch.
 **Status: IMPLEMENTED.** The master key, per-file derivation and generations
 are all in `src/crypto.ts` and `src/keyring.ts`. `bindPath` works; hardware
 providers behind [06](06-key-provider-port.md) do not exist yet — this
-document describes them, `passphrase-file` is what ships.
+document describes them, `passphrase-file` is what ships. The
+`securegit/tag/v1` and `securegit/dek/v1` HKDF labels are pinned directly in
+`src/vectors.test.ts`, independent of the envelope round-trip in
+[03](03-determinism.md) and [04](04-envelope-format.md): `deriveTagKey`,
+`contentTag` and `deriveFileKey` are each called against a fixed key and
+plaintext in `tests/fixtures/vectors/v1.json`'s `hkdf` block and compared to
+frozen hex, so a rename of either label is caught here even though the
+envelope-level vectors would also — indirectly — notice the same change.
 
 ## Core Principle
 
@@ -180,7 +187,7 @@ repository working tree — a mistake that would otherwise be committed.
 
 | Test | Test File | Fixture | Status |
 |------|-----------|---------|--------|
-| HKDF labels match the committed vectors | `src/vectors.test.ts` | `vectors/` | 🔲 |
+| HKDF labels match the committed vectors | `src/vectors.test.ts` | `vectors/` | ✅ |
 | Two different plaintexts yield unrelated DEKs | `src/crypto.test.ts` | — | ✅ |
 | Fingerprint is stable and 16 hex characters | `src/crypto.test.ts` | — | ✅ |
 | `rotate` preserves every earlier generation | `src/keyring.test.ts` | — | ✅ |
