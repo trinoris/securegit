@@ -218,6 +218,16 @@ attributes   4 patterns, 12 files protected
 Exit code 0 when usable, 1 when locked, 2 when misconfigured — so a shell prompt
 or a pre-push hook can branch on it.
 
+As built, this illustrative example is richer than the actual output:
+`securegit status` prints `repository`/`repoId`/`bindPath`/`padTo`/`session`
+plus a one-line pointer to `securegit status --json` for
+[14](14-metadata-leakage.md)'s M1–M12 metadata-leakage report (the
+`metadata` field of `--json`'s output). The keyring generation range,
+per-provider availability, git-config check marks, and attribute/file counts
+shown above are not built — `status` stays a cheap, session-only read
+(`loadKeys`), not a scan of the keyring file or the working tree the way
+`verify` is.
+
 ## Test Cases
 
 | Test | Test File | Fixture | Status |

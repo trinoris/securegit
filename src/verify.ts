@@ -737,3 +737,122 @@ export async function historyReport(opts: HistoryOptions): Promise<HistoryReport
   const textconvNotesRef = await textconvNotesRefStatus(opts.repoDir);
   return { commitsWalked: commits.length, findings, textconvNotesRef };
 }
+
+// ---------------------------------------------------------------------------
+// M1–M12 — "status reports which apply". See 14-metadata-leakage.md.
+// ---------------------------------------------------------------------------
+
+export interface MetadataObservable {
+  code: string;
+  observable: string;
+  /** Whether this repository currently has anything to observe here — false only for M11 with no recipients. */
+  applies: boolean;
+  note: string;
+}
+
+export interface MetadataReport {
+  observables: MetadataObservable[];
+}
+
+/**
+ * A static list, not a live audit: every M-code the spec catalogues, with
+ * the two that respond to local config (`padTo`, `bindPath`) reflecting
+ * their actual current mitigation state, and M11 (recipient metadata)
+ * reporting whether it applies at all — every other observable is
+ * unconditional (inherent to committing to a Git repository), so
+ * `applies` is always `true` for them, and mitigation is always "no" per
+ * the spec's own table.
+ */
+export async function metadataReport(opts: { repoDir: string }): Promise<MetadataReport> {
+  const config = await readConfig(opts.repoDir);
+
+  let recipientCount = 0;
+  try {
+    recipientCount = (await readdir(recipientsDir(opts.repoDir))).filter((f) => f.endsWith('.json')).length;
+  } catch {
+    // no recipients directory
+  }
+
+  const observables: MetadataObservable[] = [
+    {
+      code: 'M1',
+      observable: 'Every file path and directory name',
+      applies: true,
+      note: 'not mitigable — tree objects are not filtered',
+    },
+    {
+      code: 'M2',
+      observable: 'File sizes, ± 63 bytes of envelope overhead',
+      applies: true,
+      note:
+        config.padTo > 0
+          ? `partially mitigated — padTo=${config.padTo}`
+          : 'not mitigated — padTo is 0 (disabled)',
+    },
+    {
+      code: 'M3',
+      observable: 'Which commits touched which paths',
+      applies: true,
+      note: 'not mitigable — tree diffs',
+    },
+    {
+      code: 'M4',
+      observable: 'Commit messages',
+      applies: true,
+      note: 'not mitigable — commit objects are not filtered',
+    },
+    {
+      code: 'M5',
+      observable: 'Author name, email, timestamps',
+      applies: true,
+      note: 'not mitigable — commit objects',
+    },
+    {
+      code: 'M6',
+      observable: 'Branch and tag names',
+      applies: true,
+      note: 'not mitigable — refs',
+    },
+    {
+      code: 'M7',
+      observable: 'The commit graph — merges, rate, contributors',
+      applies: true,
+      note: 'not mitigable — commit objects',
+    },
+    {
+      code: 'M8',
+      observable: 'Blob equality across paths, commits and branches',
+      applies: true,
+      note: config.bindPath ? 'partially mitigated — bindPath is on' : 'not mitigated — bindPath is off',
+    },
+    {
+      code: 'M9',
+      observable: 'Whether a change reverted to an earlier state',
+      applies: true,
+      note: 'not mitigable — neither bindPath nor padTo removes this',
+    },
+    {
+      code: 'M10',
+      observable: 'Which files are protected at all',
+      applies: true,
+      note: 'not mitigable — .gitattributes is plaintext',
+    },
+    {
+      code: 'M11',
+      observable: 'Recipient count, labels, fingerprints, join dates',
+      applies: recipientCount > 0,
+      note:
+        recipientCount > 0
+          ? 'not mitigable — .securegit/recipients/ is plaintext'
+          : 'does not apply — no recipients',
+    },
+    {
+      code: 'M12',
+      observable: 'Key generation in use per blob',
+      applies: true,
+      note: 'not mitigable — envelope keyId',
+    },
+  ];
+
+  return { observables };
+}

@@ -35,6 +35,7 @@ import {
   verifyExitCode,
   accessReport,
   historyReport,
+  metadataReport,
   TEXTCONV_NOTES_REF,
   checkAttr,
   listTrackedPaths,
@@ -367,15 +368,32 @@ async function cmdLock(_args: string[], io: CliIO): Promise<number> {
   return EXIT_OK;
 }
 
-async function cmdStatus(_args: string[], io: CliIO): Promise<number> {
+async function cmdStatus(args: string[], io: CliIO): Promise<number> {
   const loaded = await loadKeys(io);
   if (!loaded.ok) return loaded.code;
   const current = loaded.keys.current();
+
+  if (args.includes('--json')) {
+    const metadata = await metadataReport({ repoDir: io.cwd });
+    writeJson(io, {
+      repository: io.cwd,
+      repoId: loaded.config.repoId,
+      bindPath: loaded.config.bindPath,
+      padTo: loaded.config.padTo,
+      locked: current === null,
+      generation: current ? current.keyId : null,
+      metadata,
+    });
+    return current ? EXIT_OK : EXIT_LOCKED;
+  }
+
   io.stderr(
     `repository   ${io.cwd}\n` +
       `repoId       ${loaded.config.repoId}\n` +
       `bindPath     ${loaded.config.bindPath}\n` +
-      `session      ${current ? `unlocked, generation ${current.keyId}` : 'locked'}`,
+      `padTo        ${loaded.config.padTo}\n` +
+      `session      ${current ? `unlocked, generation ${current.keyId}` : 'locked'}\n` +
+      `metadata     M1–M12 (14-metadata-leakage.md): securegit status --json`,
   );
   return current ? EXIT_OK : EXIT_LOCKED;
 }
@@ -939,9 +957,26 @@ function isoDate(timestamp: string): string {
   return timestamp.slice(0, 10);
 }
 
+/**
+ * `--json`'s one writer: the report object itself, exactly as the module
+ * that built it returned it — no separate JSON-specific shape to keep in
+ * sync with the human-readable rendering. stdout, since `--json` is the
+ * documented escape hatch for a script that wants a normally-stderr report
+ * as data instead (10-cli-contract.md).
+ */
+function writeJson(io: CliIO, value: unknown): void {
+  io.stdout(Buffer.from(`${JSON.stringify(value, null, 2)}\n`, 'utf8'));
+}
+
 /** "Who can read this repository" — 13-verify.md. No key required, same as the base `verify()` form. */
-async function cmdVerifyAccess(io: CliIO): Promise<number> {
+async function cmdVerifyAccess(args: string[], io: CliIO): Promise<number> {
   const report = await accessReport({ repoDir: io.cwd, home: io.home, env: io.env });
+
+  if (args.includes('--json')) {
+    writeJson(io, report);
+    return EXIT_OK;
+  }
+
   const lines: string[] = [];
 
   lines.push('recipients');
@@ -999,8 +1034,15 @@ async function cmdVerifyAccess(io: CliIO): Promise<number> {
  * on the same condition the base form does: plaintext actually found,
  * whether in the index (base form) or reachable history (this one).
  */
-async function cmdVerifyHistory(io: CliIO): Promise<number> {
+async function cmdVerifyHistory(args: string[], io: CliIO): Promise<number> {
   const report = await historyReport({ repoDir: io.cwd });
+  const leaked = report.findings.length > 0 || report.textconvNotesRef.present;
+
+  if (args.includes('--json')) {
+    writeJson(io, report);
+    return leaked ? EXIT_LEAK : EXIT_OK;
+  }
+
   const lines: string[] = [`scanning ${report.commitsWalked} commits …`];
 
   for (const f of report.findings) {
@@ -1016,7 +1058,6 @@ async function cmdVerifyHistory(io: CliIO): Promise<number> {
     lines.push(`     ${TEXTCONV_NOTES_REF} — ${report.textconvNotesRef.count} blobs of plaintext`);
   }
 
-  const leaked = report.findings.length > 0 || report.textconvNotesRef.present;
   if (!leaked) {
     lines.push('  ✓  no plaintext found in history');
   } else {
@@ -1035,10 +1076,10 @@ async function cmdVerifyHistory(io: CliIO): Promise<number> {
 /** No key required — every check here works from public information. See 13-verify.md. */
 async function cmdVerify(args: string[], io: CliIO): Promise<number> {
   if (args.includes('--access')) {
-    return await cmdVerifyAccess(io);
+    return await cmdVerifyAccess(args, io);
   }
   if (args.includes('--history')) {
-    return await cmdVerifyHistory(io);
+    return await cmdVerifyHistory(args, io);
   }
 
   // Only `describe()` is ever called on this — verify() unwraps nothing, so
@@ -1051,6 +1092,11 @@ async function cmdVerify(args: string[], io: CliIO): Promise<number> {
   } catch (e) {
     io.stderr((e as Error).message);
     return EXIT_MISCONFIGURED;
+  }
+
+  if (args.includes('--json')) {
+    writeJson(io, report);
+    return verifyExitCode(report);
   }
 
   const lines: string[] = [];
@@ -1310,10 +1356,23 @@ async function cmdInspect(args: string[], io: CliIO): Promise<number> {
     io.stderr((e as Error).message);
     return EXIT_CRYPTO;
   }
+
+  if (args.includes('--json')) {
+    writeJson(io, {
+      format: header.format,
+      algorithm: header.algorithm,
+      bindPath: header.bindPath,
+      padded: header.padded,
+      keyId: header.keyId,
+      ciphertextLength: header.ciphertext.length,
+    });
+    return EXIT_OK;
+  }
+
   io.stderr(
     `format      ${header.format}\n` +
       `algorithm   ${header.algorithm}\n` +
-      `flags       bindPath=${header.bindPath}\n` +
+      `flags       bindPath=${header.bindPath}, padded=${header.padded}\n` +
       `keyId       ${header.keyId}\n` +
       `ciphertext  ${header.ciphertext.length} bytes`,
   );

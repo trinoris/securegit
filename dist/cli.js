@@ -20,7 +20,7 @@ import { PassphraseFileProvider, ProviderError } from './provider.js';
 import { lockSession, readSession, resolveSessionPath, writeSession } from './session.js';
 import { LockedError, clean, smudge, textconv } from './filter.js';
 import { EnvelopeError, parseEnvelope, seal, unseal } from './envelope.js';
-import { verify, verifyExitCode, accessReport, historyReport, TEXTCONV_NOTES_REF, checkAttr, listTrackedPaths, readIndexBlob, } from './verify.js';
+import { verify, verifyExitCode, accessReport, historyReport, metadataReport, TEXTCONV_NOTES_REF, checkAttr, listTrackedPaths, readIndexBlob, } from './verify.js';
 import { merge } from './merge.js';
 import { IdentityError, createIdentity, decodePublicKey, identityFingerprint, identityPath, readIdentityFile, unlockIdentity, writeIdentityFile, } from './identity.js';
 import { RecipientError, appendRemovedRecipientLogEntry, recipientPath, recipientsDir, readRecipientFile, removedRecipientsLogPath, unlockFromRecipientFile, wrapAllGenerations, wrapForRecipient, writeRecipientFile, } from './recipients.js';
@@ -260,15 +260,30 @@ async function cmdLock(_args, io) {
     io.stderr('securegit: locked');
     return EXIT_OK;
 }
-async function cmdStatus(_args, io) {
+async function cmdStatus(args, io) {
     const loaded = await loadKeys(io);
     if (!loaded.ok)
         return loaded.code;
     const current = loaded.keys.current();
+    if (args.includes('--json')) {
+        const metadata = await metadataReport({ repoDir: io.cwd });
+        writeJson(io, {
+            repository: io.cwd,
+            repoId: loaded.config.repoId,
+            bindPath: loaded.config.bindPath,
+            padTo: loaded.config.padTo,
+            locked: current === null,
+            generation: current ? current.keyId : null,
+            metadata,
+        });
+        return current ? EXIT_OK : EXIT_LOCKED;
+    }
     io.stderr(`repository   ${io.cwd}\n` +
         `repoId       ${loaded.config.repoId}\n` +
         `bindPath     ${loaded.config.bindPath}\n` +
-        `session      ${current ? `unlocked, generation ${current.keyId}` : 'locked'}`);
+        `padTo        ${loaded.config.padTo}\n` +
+        `session      ${current ? `unlocked, generation ${current.keyId}` : 'locked'}\n` +
+        `metadata     M1–M12 (14-metadata-leakage.md): securegit status --json`);
     return current ? EXIT_OK : EXIT_LOCKED;
 }
 // ---------------------------------------------------------------------------
@@ -775,9 +790,23 @@ function formatGenerationRange(generations) {
 function isoDate(timestamp) {
     return timestamp.slice(0, 10);
 }
+/**
+ * `--json`'s one writer: the report object itself, exactly as the module
+ * that built it returned it — no separate JSON-specific shape to keep in
+ * sync with the human-readable rendering. stdout, since `--json` is the
+ * documented escape hatch for a script that wants a normally-stderr report
+ * as data instead (10-cli-contract.md).
+ */
+function writeJson(io, value) {
+    io.stdout(Buffer.from(`${JSON.stringify(value, null, 2)}\n`, 'utf8'));
+}
 /** "Who can read this repository" — 13-verify.md. No key required, same as the base `verify()` form. */
-async function cmdVerifyAccess(io) {
+async function cmdVerifyAccess(args, io) {
     const report = await accessReport({ repoDir: io.cwd, home: io.home, env: io.env });
+    if (args.includes('--json')) {
+        writeJson(io, report);
+        return EXIT_OK;
+    }
     const lines = [];
     lines.push('recipients');
     if (report.recipients.length === 0) {
@@ -821,8 +850,13 @@ async function cmdVerifyAccess(io) {
  * on the same condition the base form does: plaintext actually found,
  * whether in the index (base form) or reachable history (this one).
  */
-async function cmdVerifyHistory(io) {
+async function cmdVerifyHistory(args, io) {
     const report = await historyReport({ repoDir: io.cwd });
+    const leaked = report.findings.length > 0 || report.textconvNotesRef.present;
+    if (args.includes('--json')) {
+        writeJson(io, report);
+        return leaked ? EXIT_LEAK : EXIT_OK;
+    }
     const lines = [`scanning ${report.commitsWalked} commits …`];
     for (const f of report.findings) {
         lines.push(`  ✗  plaintext at ${f.path}`);
@@ -835,7 +869,6 @@ async function cmdVerifyHistory(io) {
         lines.push('  ✗  textconv cache notes ref present');
         lines.push(`     ${TEXTCONV_NOTES_REF} — ${report.textconvNotesRef.count} blobs of plaintext`);
     }
-    const leaked = report.findings.length > 0 || report.textconvNotesRef.present;
     if (!leaked) {
         lines.push('  ✓  no plaintext found in history');
     }
@@ -848,10 +881,10 @@ async function cmdVerifyHistory(io) {
 /** No key required — every check here works from public information. See 13-verify.md. */
 async function cmdVerify(args, io) {
     if (args.includes('--access')) {
-        return await cmdVerifyAccess(io);
+        return await cmdVerifyAccess(args, io);
     }
     if (args.includes('--history')) {
-        return await cmdVerifyHistory(io);
+        return await cmdVerifyHistory(args, io);
     }
     // Only `describe()` is ever called on this — verify() unwraps nothing, so
     // it never needs a real passphrase.
@@ -863,6 +896,10 @@ async function cmdVerify(args, io) {
     catch (e) {
         io.stderr(e.message);
         return EXIT_MISCONFIGURED;
+    }
+    if (args.includes('--json')) {
+        writeJson(io, report);
+        return verifyExitCode(report);
     }
     const lines = [];
     for (const check of report.checks) {
@@ -1098,9 +1135,20 @@ async function cmdInspect(args, io) {
         io.stderr(e.message);
         return EXIT_CRYPTO;
     }
+    if (args.includes('--json')) {
+        writeJson(io, {
+            format: header.format,
+            algorithm: header.algorithm,
+            bindPath: header.bindPath,
+            padded: header.padded,
+            keyId: header.keyId,
+            ciphertextLength: header.ciphertext.length,
+        });
+        return EXIT_OK;
+    }
     io.stderr(`format      ${header.format}\n` +
         `algorithm   ${header.algorithm}\n` +
-        `flags       bindPath=${header.bindPath}\n` +
+        `flags       bindPath=${header.bindPath}, padded=${header.padded}\n` +
         `keyId       ${header.keyId}\n` +
         `ciphertext  ${header.ciphertext.length} bytes`);
     return EXIT_OK;

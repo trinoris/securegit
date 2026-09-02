@@ -9,7 +9,13 @@ confusing the two.
 **Status: MOSTLY IMPLEMENTED.** `src/cli.ts` covers every command below
 except `unprotect` and `key add-provider`/`remove-provider`/`list`/
 `list-recipients`. `verify` now covers its base form, `--history`, and
-`--access` — only `--json` remains unbuilt. `identity
+`--access`. `--json` is implemented too, for every command that currently
+exists and produces a report — `status`, `verify` (all three forms), and
+`inspect` — writing the underlying report object straight to stdout via
+`JSON.stringify`, no separate schema to keep in sync with the
+human-readable rendering; `key list`/`list-recipients` are the two commands
+spec 10's own global-flags table names for `--json` that don't exist yet,
+so there is nothing for `--json` to do for them. `identity
 init`/`show` and `key add-recipient`/`remove-recipient` — the
 multi-recipient join flow — are implemented, including `unlock` bootstrapping
 a session from a recipient file alone when no local keyring exists. `key
@@ -47,8 +53,8 @@ one `stdin` buffer and one `runCli()` return), so it gets its own entrypoint,
 | `securegit install [--process] [--no-required] [--bin <cmd>]` | Write `.git/config` filter, diff and merge driver entries ([02](02-git-integration.md), [12](12-diff-merge.md)). Idempotent. `--bin` overrides the command Git invokes (default: the resolved `securegit` on `PATH`) — for a global install where `securegit` is not literally the right invocation on every machine (e.g. `node /path/to/securegit.js`, or a version-pinned wrapper), and for the integration test suite, which cannot assume `securegit` is on `PATH` for a binary that was just built. Not meant to be reached for by a normal user. |
 | `securegit protect <pattern>…` | Add patterns to `.gitattributes` with `filter`, `diff`, `merge` and `-text`, keeping the `.securegit/**` exclusion last. |
 | `securegit unprotect <pattern>…` | Remove patterns. Warns that already-committed blobs stay encrypted until re-committed. |
-| `securegit status` | The diagnostic report in [07](07-unlock-session.md). |
-| `securegit verify [--history\|--access]` | The audit in [13](13-verify.md). Implemented: the base form (config + index checks, leak/advice scan), `--history` (a real commit walk — CI-tier speed, not pre-commit), and `--access` (who can read this repository). Not yet: `--json`. |
+| `securegit status [--json]` | The diagnostic report in [07](07-unlock-session.md). `--json`: `{repository, repoId, bindPath, padTo, locked, generation, metadata}` to stdout — `metadata` is [14](14-metadata-leakage.md)'s M1–M12 report; the human-readable form prints `padTo` alongside `bindPath` and points at `status --json` for the M1–M12 detail rather than repeating twelve mostly-static lines. |
+| `securegit verify [--history\|--access] [--json]` | The audit in [13](13-verify.md). Implemented: the base form (config + index checks, leak/advice scan), `--history` (a real commit walk — CI-tier speed, not pre-commit), `--access` (who can read this repository), and `--json` for all three. |
 | `securegit reencrypt [--paths <pathspec>] [--dry-run]` | Move protected files to the current generation ([09](09-rotation-recovery.md)). Stages via plumbing — never writes the worktree file. `--paths` is a prefix match, not full git pathspec syntax. |
 
 ### Filters — invoked by Git, not by people
@@ -112,7 +118,7 @@ existing member to run `key add-recipient`.
 |---|---|
 | `securegit encrypt <file> [--out <file>]` | Envelope a file outside Git. `-` for stdin/stdout. |
 | `securegit decrypt <file> [--out <file>]` | The inverse. |
-| `securegit inspect <file>` | Header fields, no key required ([04](04-envelope-format.md)). |
+| `securegit inspect <file> [--json]` | Header fields, no key required ([04](04-envelope-format.md)). `--json`: `{format, algorithm, bindPath, padded, keyId, ciphertextLength}` to stdout. |
 
 `encrypt` / `decrypt` exist because a spec that offers no way to test the
 cryptography without a repository is a spec whose cryptography does not get
@@ -155,7 +161,7 @@ English.
 |---|---|
 | `--repo <path>` | Operate on a repository other than the current directory. |
 | `--strict` | `smudge` fails rather than passing ciphertext through ([07](07-unlock-session.md)). |
-| `--json` | Machine-readable output for `status`, `verify`, `key list`, `list-recipients`, `inspect`. Goes to stdout; still nothing else does. |
+| `--json` | Machine-readable output for `status`, `verify` (all three forms), and `inspect` — the report object itself, `JSON.stringify`'d, straight to stdout. `key list`/`list-recipients` don't exist yet, so `--json` has nothing to do for them. |
 | `--quiet` | Suppress non-error stderr output. |
 | `-v`, `--verbose` | Per-file tracing to stderr. Never includes plaintext, key material, or a passphrase. |
 
@@ -204,8 +210,10 @@ and `decrypt` writing to `-`, are the exhaustive list of stdout writers in
 the rule's own definition, and routing it to stderr uniformly means a script
 can never be surprised by which stream carries which command's output — the
 answer is always "content commands only," not "commands a human is unlikely to
-pipe." `--json` (not yet implemented) is the intended escape hatch for a
-script that wants `status`/`inspect` output on stdout deliberately.
+pipe." `--json` is the escape hatch for a script that wants `status`/
+`inspect`/`verify` output on stdout deliberately, now built for exactly
+those three (`key list`/`list-recipients`, the other two spec 10 names for
+it, don't exist yet).
 
 ## Output discipline
 
@@ -228,7 +236,9 @@ script that wants `status`/`inspect` output on stdout deliberately.
 |------|-----------|---------|--------|
 | Every command writes diagnostics to stderr only | `src/cli.test.ts` | — | ✅ |
 | Exit codes match the table | `src/cli.test.ts` | — | ✅ |
-| `--json` output validates against its schema | `src/cli.test.ts` | — | 🔲 |
+| `status --json` writes `{repository, repoId, bindPath, padTo, locked, generation}` to stdout, nothing to stderr | `src/cli.test.ts` | — | ✅ |
+| `verify --json` / `--access --json` / `--history --json` each write their report object to stdout | `src/cli.test.ts` | — | ✅ |
+| `inspect --json` writes header fields (including `padded`) to stdout | `src/cli.test.ts` | — | ✅ |
 | Unknown flag exits 4 with usage | `src/cli.test.ts` | — | ✅ |
 | `init` outside a repository exits 4 | `src/cli.test.ts` | — | ✅ |
 | `init` twice exits 4 rather than regenerating a key | `src/cli.test.ts` | — | ✅ |

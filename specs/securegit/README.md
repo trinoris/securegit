@@ -333,18 +333,34 @@ with the envelope itself. Proven against a real commit: `init --pad-to 256`,
 a 3-byte file, a committed blob well over 256 bytes, and an exact
 3-byte checkout.
 
-554 unit tests total, all green; 25 integration tests, all green. What
-remains: `verify --json`, `status` reporting M1–M12, and the rest of
-padding's genuinely inherent siblings
-([14](14-metadata-leakage.md)). TypeScript, `src/` →
-`dist/`, unit tests beside the source, matching `@trinoris/decision-core`.
+`--json` is built too, for every command that currently produces a report —
+`status`, `verify` (all three forms), and `inspect`. Each just
+`JSON.stringify`s the same report object the human-readable rendering reads
+from, to stdout, nothing to stderr — no separate schema to define or keep
+in sync. `key list`/`list-recipients`, the other two commands spec 10 names
+for `--json`, don't exist yet, so there's nothing for it to do there.
+
+`status` reporting M1–M12 ([14](14-metadata-leakage.md)) is built too —
+`metadataReport()` in `verify.ts` is a static catalogue crossed with local
+config, not a live scan: nine of the twelve observables are unconditional
+(inherent to committing to a Git repository at all), and only M2 (`padTo`),
+M8 (`bindPath`), and M11 (whether any recipients exist) actually vary.
+Wired into `status --json`'s `metadata` field; the human-readable form gets
+one pointer line rather than twelve mostly-static ones repeated on every
+call.
+
+567 unit tests total, all green; 25 integration tests, all green. What
+remains is the genuinely inherent parts of metadata leakage
+([14](14-metadata-leakage.md)) — nothing a filter can fix. TypeScript,
+`src/` → `dist/`, unit tests beside the source, matching
+`@trinoris/decision-core`.
 
 | | Implemented | Designed only |
 |---|---|---|
 | Cryptography | derivations, envelope, padding | known-answer vectors |
 | Git integration | clean/smudge/textconv, attributes, filter-process, real-`git` round trip | — |
 | Keys | keyring, passphrase provider, session, identity keypair/encoding, recipient wrap/unwrap, rotation, recovery export/import | — |
-| Tooling | CLI (`init`/`init --pad-to`/`install`/`protect`/`unlock`/`lock`/`status`/`identity`/`key add-recipient`/`key remove-recipient`/`key rotate`/`reencrypt`/`key export-recovery`/`key import-recovery`/`verify`/`verify --access`/`verify --history`/`clean`/`smudge`/`textconv`/`merge`/`encrypt`/`decrypt`/`inspect`/`filter-process`) | `verify --json` |
+| Tooling | CLI (`init`/`init --pad-to`/`install`/`protect`/`unlock`/`lock`/`status`/`status --json`/`identity`/`key add-recipient`/`key remove-recipient`/`key rotate`/`reencrypt`/`key export-recovery`/`key import-recovery`/`verify`/`verify --access`/`verify --history`/`verify --json`/`clean`/`smudge`/`textconv`/`merge`/`encrypt`/`decrypt`/`inspect`/`inspect --json`/`filter-process`) | — |
 
 Ten things worth knowing before reading any spec here. The first three are the
 load-bearing ones; the last two are about scope.

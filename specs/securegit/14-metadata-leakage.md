@@ -6,15 +6,18 @@ Everything an observer holding the encrypted repository can still learn. This is
 the residue [01](01-threat-model.md) declared out of scope, enumerated, because
 "out of scope" is only an acceptable answer if the reader knows what it covers.
 
-**Status: INHERENT, except M2, which is IMPLEMENTED.** Most of this cannot
-be fixed within Git's object model. The parts that can be are marked.
-`padTo` (M2's mitigation) is built: `src/envelope.ts`'s `seal`/`unseal`
-(a length-prefixed pad/unpad scheme behind a new `flags` bit),
-`src/config.ts`'s `RepoConfig.padTo` (set only at `init`, like `bindPath`),
-and every place that calls `seal` — `clean`, `reencrypt`, `merge`,
-`filter-process`, `encrypt` — now threads it through. See "What this pass
-actually built" below. `status` reporting which of M1–M12 apply
-(`securegit status`'s own output) is not built.
+**Status: INHERENT, except M2, which is IMPLEMENTED — and `status` now
+reports which of M1–M12 apply.** Most of this cannot be fixed within Git's
+object model. The parts that can be are marked. `padTo` (M2's mitigation) is
+built: `src/envelope.ts`'s `seal`/`unseal` (a length-prefixed pad/unpad
+scheme behind a new `flags` bit), `src/config.ts`'s `RepoConfig.padTo` (set
+only at `init`, like `bindPath`), and every place that calls `seal` —
+`clean`, `reencrypt`, `merge`, `filter-process`, `encrypt` — now threads it
+through. `src/verify.ts`'s new `metadataReport()` — a static catalogue of
+all twelve observables, not a live audit — is wired into `securegit status
+--json`'s `metadata` field; the human-readable form gets a one-line pointer
+to it rather than twelve lines repeated on every call. See "What this pass
+actually built" below.
 
 ## Core Principle
 
@@ -190,6 +193,25 @@ state travels with the envelope itself, in the flag bit.
   commits a 3-byte file, and checks the committed blob is well over 256
   bytes (padding actually inflated the ciphertext, not just set a flag) while
   the checked-out worktree file is still the exact original 3 bytes.
+- **`metadataReport()` is a static catalogue, not a live audit.** Unlike
+  `verify()`/`historyReport()`, which scan actual committed content, this
+  just reports what the spec's own table already says is true, crossed with
+  local config — it reads `RepoConfig.padTo`/`bindPath` and whether any
+  `.securegit/recipients/*.json` files exist, nothing else. Nine of the
+  twelve observables (M1, M3–M7, M9, M10, M12) are unconditional — inherent
+  to committing to a Git repository at all, per the spec's own "Mitigable:
+  no" — so `applies` is always `true` for them and the note always says so;
+  only M2 (`padTo`) and M8 (`bindPath`) have a real mitigation state to
+  report, and only M11 (recipient metadata) can genuinely not apply, when
+  there are no recipients to have metadata about.
+- **Wired into `status --json`'s `metadata` field, not the default
+  human-readable output.** Printing twelve mostly-static lines on every
+  plain `securegit status` would bury the four lines that actually vary
+  (repository, repoId, session state, and now `padTo`) under boilerplate
+  that never changes for a given repository. The human form instead gets
+  one line pointing at `securegit status --json` for the full list — the
+  two configurable ones (M2, M8) are already implied by the `padTo`/
+  `bindPath` lines already printed just above it.
 
 ## Test Cases
 
@@ -205,7 +227,13 @@ state travels with the envelope itself, in the flag bit.
 | `init --pad-to` round-trips through a real commit, larger blob, exact checkout | `src/git.integration.test.ts` | — | ✅ |
 | `clean`/`smudge`/`merge`/`filter-process` all apply the repository's `padTo` | `src/filter.test.ts`, `src/merge.test.ts`, `src/process.test.ts`, `src/cli.test.ts` | — | ✅ |
 | `padTo` change is refused without a rotation | `src/config.test.ts` | — | 🔲 (there is no command to change `padTo` post-`init` at all — same as `bindPath` — so there is nothing to "refuse" via the CLI; a hand-edit of `config.json` bypasses any such check by construction) |
-| `status` reports which of M1–M12 apply to this repository | `src/cli.test.ts` | — | 🔲 |
+| `metadataReport()` lists all 12 observables, each with a code and a note | `src/verify.test.ts` | — | ✅ |
+| Every inherent (non-configurable) observable always applies | `src/verify.test.ts` | — | ✅ |
+| M2 reflects `padTo`: unmitigated at 0, partially mitigated once set | `src/verify.test.ts` | — | ✅ |
+| M8 reflects `bindPath`: unmitigated off, partially mitigated once on | `src/verify.test.ts` | — | ✅ |
+| M11 does not apply with no recipients, and does once one exists | `src/verify.test.ts` | — | ✅ |
+| `status --json` includes the M1–M12 metadata report | `src/cli.test.ts` | — | ✅ |
+| The human-readable form points at `status --json` for the M1–M12 detail | `src/cli.test.ts` | — | ✅ |
 
 ## Relationship to Other Specs
 

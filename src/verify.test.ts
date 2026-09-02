@@ -16,6 +16,7 @@ import {
   verifyExitCode,
   accessReport,
   historyReport,
+  metadataReport,
   NAME_HEURISTICS,
   CONTENT_HEURISTICS,
   EXIT_VERIFY_OK,
@@ -590,5 +591,81 @@ describe('historyReport()', () => {
 
     const report = await historyReport({ repoDir: dir });
     expect(report.commitsWalked).toBe(3);
+  });
+});
+
+describe('metadataReport()', () => {
+  it('lists all 12 observables, each with a code and a note', async () => {
+    await setUpProtectedRepo();
+    const report = await metadataReport({ repoDir: dir });
+    expect(report.observables.map((o) => o.code)).toEqual([
+      'M1', 'M2', 'M3', 'M4', 'M5', 'M6', 'M7', 'M8', 'M9', 'M10', 'M11', 'M12',
+    ]);
+    for (const o of report.observables) {
+      expect(o.observable.length).toBeGreaterThan(0);
+      expect(o.note.length).toBeGreaterThan(0);
+    }
+  });
+
+  it('every inherent (non-configurable) observable always applies', async () => {
+    await setUpProtectedRepo();
+    const report = await metadataReport({ repoDir: dir });
+    for (const code of ['M1', 'M3', 'M4', 'M5', 'M6', 'M7', 'M9', 'M10', 'M12']) {
+      const o = report.observables.find((x) => x.code === code)!;
+      expect(o.applies).toBe(true);
+      expect(o.note).toMatch(/not mitigable/);
+    }
+  });
+
+  it('M2 reflects padTo: unmitigated at 0 (the default), partially mitigated once set', async () => {
+    await initConfig(dir); // padTo defaults to 0
+    let report = await metadataReport({ repoDir: dir });
+    expect(report.observables.find((o) => o.code === 'M2')!.note).toMatch(/not mitigated/);
+
+    await rm(join(dir, '.securegit', 'config.json'));
+    await initConfig(dir, { padTo: 4096 });
+    report = await metadataReport({ repoDir: dir });
+    const m2 = report.observables.find((o) => o.code === 'M2')!;
+    expect(m2.applies).toBe(true);
+    expect(m2.note).toMatch(/partially mitigated/);
+    expect(m2.note).toContain('4096');
+  });
+
+  it('M8 reflects bindPath: unmitigated off (the default), partially mitigated once on', async () => {
+    await initConfig(dir); // bindPath defaults to false
+    let report = await metadataReport({ repoDir: dir });
+    expect(report.observables.find((o) => o.code === 'M8')!.note).toMatch(/not mitigated/);
+
+    await rm(join(dir, '.securegit', 'config.json'));
+    await initConfig(dir, { bindPath: true });
+    report = await metadataReport({ repoDir: dir });
+    const m8 = report.observables.find((o) => o.code === 'M8')!;
+    expect(m8.applies).toBe(true);
+    expect(m8.note).toMatch(/partially mitigated/);
+  });
+
+  it('M11 does not apply with no recipients, and does once one exists', async () => {
+    const { repoId, rmk, keyId } = await setUpProtectedRepo();
+    let report = await metadataReport({ repoDir: dir });
+    expect(report.observables.find((o) => o.code === 'M11')!.applies).toBe(false);
+
+    const recipientKeyPair = generateX25519KeyPair();
+    const fingerprint = identityFingerprint(recipientKeyPair.publicKey);
+    const wrapped = wrapAllGenerations(singleKeySource(keyId, rmk), [keyId], recipientKeyPair.publicKey, repoId);
+    const file: RecipientFile = {
+      version: 1,
+      fingerprint,
+      publicKey: 'SGPUB1-does-not-need-to-decode-for-this-test',
+      label: 'laptop',
+      addedAt: '2026-01-14T00:00:00.000Z',
+      addedBy: '',
+      keys: wrapped,
+    };
+    await writeRecipientFile(recipientPath(dir, fingerprint), file);
+
+    report = await metadataReport({ repoDir: dir });
+    const m11 = report.observables.find((o) => o.code === 'M11')!;
+    expect(m11.applies).toBe(true);
+    expect(m11.note).toMatch(/not mitigable/);
   });
 });

@@ -223,6 +223,54 @@ describe('unlock / lock / status', () => {
     await h.run(['lock']);
     expect(h.stdoutCalls()).toBe(0);
   });
+
+  describe('status --json', () => {
+    it('writes machine-readable output to stdout, not stderr', async () => {
+      const h = harness();
+      await h.run(['init']);
+      await h.run(['unlock']);
+      expect(await h.run(['status', '--json'])).toBe(0);
+      expect(h.stderrText()).toBe('');
+      const parsed = JSON.parse(h.stdoutText());
+      expect(parsed.repository).toBe(dir);
+      expect(parsed.locked).toBe(false);
+      expect(typeof parsed.generation).toBe('string');
+      expect(parsed.bindPath).toBe(false);
+      expect(parsed.padTo).toBe(0);
+    });
+
+    it('reports locked: true and generation: null while locked, still exiting 1', async () => {
+      const h = harness();
+      await h.run(['init']);
+      expect(await h.run(['status', '--json'])).toBe(1);
+      const parsed = JSON.parse(h.stdoutText());
+      expect(parsed.locked).toBe(true);
+      expect(parsed.generation).toBe(null);
+    });
+
+    it('includes the M1–M12 metadata report, reflecting padTo and bindPath', async () => {
+      const h = harness();
+      await h.run(['init', '--bind-path', '--pad-to', '4096']);
+      await h.run(['unlock']);
+      expect(await h.run(['status', '--json'])).toBe(0);
+      const parsed = JSON.parse(h.stdoutText());
+      expect(parsed.metadata.observables).toHaveLength(12);
+      const m2 = parsed.metadata.observables.find((o: { code: string }) => o.code === 'M2');
+      expect(m2.note).toContain('4096');
+      const m8 = parsed.metadata.observables.find((o: { code: string }) => o.code === 'M8');
+      expect(m8.note).toMatch(/partially mitigated/);
+    });
+  });
+
+  it('the human-readable form points at status --json for the M1–M12 detail, and shows padTo', async () => {
+    const h = harness();
+    await h.run(['init']);
+    await h.run(['unlock']);
+    await h.run(['status']);
+    const text = h.stderrText();
+    expect(text).toContain('padTo');
+    expect(text).toContain('status --json');
+  });
 });
 
 describe('identity', () => {
@@ -735,6 +783,20 @@ describe('verify', () => {
       expect(text).toContain('removed recipients');
     });
 
+    it('--json writes the AccessReport shape to stdout, not stderr', async () => {
+      const h = harness({ cwd: realDir });
+      await h.run(['init']);
+      await h.run(['unlock']);
+
+      expect(await h.run(['verify', '--access', '--json'])).toBe(0);
+      expect(h.stderrText()).toBe('');
+      const parsed = JSON.parse(h.stdoutText());
+      expect(parsed.recipients).toEqual([]);
+      expect(parsed.providers).toEqual([{ id: 'passphrase-file', generations: [1] }]);
+      expect(parsed.recoveryExports).toEqual([]);
+      expect(parsed.removedRecipients).toEqual([]);
+    });
+
     it('lists a recipient added via key add-recipient', async () => {
       const h = harness({ cwd: realDir });
       await h.run(['init']);
@@ -825,6 +887,48 @@ describe('verify', () => {
       expect(text).toContain('first:');
       expect(text).toContain('last:');
       expect(text).toMatch(/Rotate the secret/);
+    });
+
+    it('--json writes the HistoryReport shape to stdout, same exit code', async () => {
+      const h = harness({ cwd: realDir });
+      await h.run(['init']);
+      await h.run(['protect', 'config/production.json']);
+      await execFile('git', ['add', '-A'], { cwd: realDir });
+      await execFile('git', ['commit', '--quiet', '-m', 'init'], { cwd: realDir });
+      await stageContent(realDir, 'config/production.json', Buffer.from('{"password":"hunter2"}\n'));
+      await execFile('git', ['commit', '--quiet', '-m', 'oops'], { cwd: realDir });
+
+      expect(await h.run(['verify', '--history', '--json'])).toBe(5);
+      expect(h.stderrText()).toBe('');
+      const parsed = JSON.parse(h.stdoutText());
+      expect(parsed.findings).toHaveLength(1);
+      expect(parsed.findings[0].path).toBe('config/production.json');
+      expect(parsed.textconvNotesRef).toEqual({ present: false, count: 0 });
+    });
+  });
+
+  describe('--json (base form)', () => {
+    it('writes the VerifyReport shape to stdout, not stderr', async () => {
+      const h = harness({ cwd: realDir });
+      await h.run(['init']);
+      await h.run(['unlock']);
+      await h.run(['install']);
+      await h.run(['protect', 'config/production.json']);
+      await execFile('git', ['add', '-A'], { cwd: realDir });
+      await execFile('git', ['commit', '--quiet', '-m', 'init'], { cwd: realDir });
+
+      await h.run(['clean', '--', 'config/production.json'], {
+        stdin: Buffer.from('{"password":"hunter2"}\n'),
+      });
+      await stageContent(realDir, 'config/production.json', h.stdoutBuf());
+      await execFile('git', ['commit', '--quiet', '-m', 'add config'], { cwd: realDir });
+
+      expect(await h.run(['verify', '--json'])).toBe(0);
+      expect(h.stderrText()).toBe('');
+      const parsed = JSON.parse(h.stdoutText());
+      expect(Array.isArray(parsed.checks)).toBe(true);
+      expect(parsed.checks.every((c: { ok: boolean }) => c.ok)).toBe(true);
+      expect(parsed.findings).toEqual([]);
     });
   });
 });
@@ -1328,6 +1432,25 @@ describe('encrypt / decrypt / inspect', () => {
   it('inspect exits 3 on malformed input', async () => {
     const h = harness();
     expect(await h.run(['inspect', '-'], { stdin: Buffer.from('not an envelope') })).toBe(3);
+  });
+
+  it('inspect --json writes the header fields to stdout, not stderr', async () => {
+    const h = harness();
+    await h.run(['init']);
+    await h.run(['unlock']);
+    await h.run(['encrypt', '-'], { stdin: PT });
+    const ciphertext = h.stdoutBuf();
+
+    const fresh = harness();
+    expect(await fresh.run(['inspect', '--json', '-'], { stdin: ciphertext })).toBe(0);
+    expect(fresh.stderrText()).toBe('');
+    const parsed = JSON.parse(fresh.stdoutText());
+    expect(parsed.format).toBe(1);
+    expect(parsed.algorithm).toBe(1);
+    expect(parsed.bindPath).toBe(false);
+    expect(parsed.padded).toBe(false);
+    expect(typeof parsed.keyId).toBe('string');
+    expect(typeof parsed.ciphertextLength).toBe('number');
   });
 });
 

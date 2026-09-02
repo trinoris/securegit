@@ -373,19 +373,39 @@ such threading. Proven against a real commit in `git.integration.test.ts`:
 `init --pad-to 256`, a 3-byte file, a committed blob well over 256 bytes,
 an exact 3-byte checkout.
 
-554 unit tests, all green; 25 integration tests, all green. The package is
-TypeScript (`src/` → `dist/`, NodeNext, `strict` plus
-`noUncheckedIndexedAccess` and `exactOptionalPropertyTypes`), matching
-`@trinoris/decision-core`. Unit tests sit beside the source as `*.test.ts`;
-integration tests are `*.integration.test.ts` and run from
-`vitest.integration.config.ts`.
+`--json` closes out the CLI contract's own remaining gap
+([10](10-cli-contract.md)): `status`, `verify` (base/`--access`/`--history`),
+and `inspect` all now accept it, each writing the same report object the
+human-readable form already builds — `JSON.stringify`'d, to stdout, nothing
+to stderr — rather than a separately-defined JSON shape to keep in sync.
+`key list`/`list-recipients`, the other two commands the spec names for
+`--json`, don't exist yet.
+
+`status` reporting M1–M12 ([14](14-metadata-leakage.md)) is the last item:
+`metadataReport()` in `verify.ts`, a static catalogue crossed with local
+config rather than a live scan — nine of the twelve observables are
+unconditional (inherent to committing to a Git repository at all), and only
+`padTo` (M2), `bindPath` (M8), and whether any recipients exist (M11)
+actually vary. Wired into `status --json`'s `metadata` field; the
+human-readable form gets one pointer line rather than twelve mostly-static
+ones repeated on every call.
+
+567 unit tests, all green; 25 integration tests, all green. Everything from
+the original build order (specs/securegit/00-test-plan.md's own Phase
+1–3 steps, plus `verify --history`/`--access`/`--json`, padding, and `status`
+M1–M12) is now implemented; what remains is the genuinely inherent parts of
+metadata leakage that no filter can fix. The package is TypeScript
+(`src/` → `dist/`, NodeNext, `strict` plus `noUncheckedIndexedAccess` and
+`exactOptionalPropertyTypes`), matching `@trinoris/decision-core`. Unit
+tests sit beside the source as `*.test.ts`; integration tests are
+`*.integration.test.ts` and run from `vitest.integration.config.ts`.
 
 | | Implemented | Designed only |
 |---|---|---|
 | Cryptography | derivations, envelope, padding | known-answer vectors |
 | Git integration | filters, attributes, filter-process, real-`git` round trip | — |
 | Keys | keyring, passphrase provider, session, identity keypair/encoding, recipient wrap/unwrap, rotation, recovery export/import | — |
-| Tooling | CLI (`init`/`init --pad-to`/`install`/`protect`/`unlock`/`lock`/`status`/`identity`/`key add-recipient`/`key remove-recipient`/`key rotate`/`reencrypt`/`key export-recovery`/`key import-recovery`/`verify`/`verify --access`/`verify --history`/`clean`/`smudge`/`textconv`/`merge`/`encrypt`/`decrypt`/`inspect`/`filter-process`) | `verify --json` |
+| Tooling | CLI (`init`/`init --pad-to`/`install`/`protect`/`unlock`/`lock`/`status`/`status --json`/`identity`/`key add-recipient`/`key remove-recipient`/`key rotate`/`reencrypt`/`key export-recovery`/`key import-recovery`/`verify`/`verify --access`/`verify --history`/`verify --json`/`clean`/`smudge`/`textconv`/`merge`/`encrypt`/`decrypt`/`inspect`/`inspect --json`/`filter-process`) | — |
 
 The three things that had to be got right before anything else, because they
 cannot be changed later without breaking every repository already in use, are

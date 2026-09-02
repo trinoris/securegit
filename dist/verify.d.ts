@@ -125,4 +125,26 @@ export declare const TEXTCONV_NOTES_REF = "refs/notes/textconv/securegit";
  * hook" in 13-verify.md.
  */
 export declare function historyReport(opts: HistoryOptions): Promise<HistoryReport>;
+export interface MetadataObservable {
+    code: string;
+    observable: string;
+    /** Whether this repository currently has anything to observe here — false only for M11 with no recipients. */
+    applies: boolean;
+    note: string;
+}
+export interface MetadataReport {
+    observables: MetadataObservable[];
+}
+/**
+ * A static list, not a live audit: every M-code the spec catalogues, with
+ * the two that respond to local config (`padTo`, `bindPath`) reflecting
+ * their actual current mitigation state, and M11 (recipient metadata)
+ * reporting whether it applies at all — every other observable is
+ * unconditional (inherent to committing to a Git repository), so
+ * `applies` is always `true` for them, and mitigation is always "no" per
+ * the spec's own table.
+ */
+export declare function metadataReport(opts: {
+    repoDir: string;
+}): Promise<MetadataReport>;
 //# sourceMappingURL=verify.d.ts.map

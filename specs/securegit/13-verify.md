@@ -10,8 +10,10 @@ still configured to prevent it".
 **Status: IMPLEMENTED.** `src/verify.ts` implements the always-on
 configuration and index checks (L1–L3, L7–L10), the leak/advice content scan,
 `--access` (`accessReport()`), and `--history` (`historyReport()`) — all
-wired into `src/cli.ts` as `securegit verify [--access|--history]`. Only
-`--json` remains unbuilt. See "What this pass actually built" below.
+wired into `src/cli.ts` as `securegit verify [--access|--history] [--json]`.
+`--json` is built for all three forms: the report object itself, exactly as
+the module returns it, `JSON.stringify`'d to stdout. See "What this pass
+actually built" below.
 
 ## Core Principle
 
@@ -276,6 +278,14 @@ Scope decisions made building it, and why:
   in the very next cycle here rather than left open indefinitely, once it
   became clear two modules (this one and [12](12-diff-merge.md)'s merge
   driver) were sitting unreachable from the CLI at once.
+- **`--json` is the report object itself, `JSON.stringify`'d — no separate
+  JSON-specific shape to define or keep in sync.** `VerifyReport`,
+  `AccessReport`, and `HistoryReport` are already exactly what a script
+  wants; a bespoke JSON schema on top would just be a second description of
+  the same fields, one more thing to drift when a field is added. `--json`
+  is checked in each of `cmdVerify`/`cmdVerifyAccess`/`cmdVerifyHistory`
+  (`cli.ts`) independently, since which mode is active is decided first —
+  a caller can combine `--access --json` or `--history --json` freely.
 
 ## Test Cases
 
@@ -312,7 +322,9 @@ Scope decisions made building it, and why:
 | `verify --access` lists a recipient added via `key add-recipient` | `src/cli.test.ts` | — | ✅ |
 | `verify --access` lists a recovery export, with the non-revocable-access warning | `src/cli.test.ts` | — | ✅ |
 | `verify --access` lists a removed recipient, with the "can still read" note | `src/cli.test.ts` | — | ✅ |
-| `--json` output validates against its schema | `src/verify.test.ts` | — | 🔲 |
+| `verify --json` writes the `VerifyReport` shape to stdout, nothing to stderr | `src/cli.test.ts` | — | ✅ |
+| `verify --access --json` writes the `AccessReport` shape to stdout | `src/cli.test.ts` | — | ✅ |
+| `verify --history --json` writes the `HistoryReport` shape to stdout, same exit code | `src/cli.test.ts` | — | ✅ |
 | `verify` runs without a key present | `src/verify.test.ts` | `repo-protected/` | ✅ |
 
 ## Relationship to Other Specs
