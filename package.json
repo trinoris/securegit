@@ -1,0 +1,57 @@
+{
+  "name": "@trinoris/securegit",
+  "version": "0.1.0",
+  "description": "Client-side Git encryption: transparent AES-256-GCM clean/smudge filter with envelope keys, multi-recipient sharing and offline recovery",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "repository": {
+    "url": "https://github.com/cuongquay/trinoris-securegit.git"
+  },
+  "bin": {
+    "securegit": "./dist/bin/securegit.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./crypto": {
+      "types": "./dist/crypto.d.ts",
+      "import": "./dist/crypto.js"
+    }
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "clean": "rm -rf dist",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "test:integration": "vitest run --config vitest.integration.config.ts"
+  },
+  "keywords": [
+    "git",
+    "encryption",
+    "clean-smudge",
+    "aes-gcm",
+    "secrets"
+  ],
+  "author": "TRINORIS",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@vitest/coverage-v8": "^4.1.10",
+    "typescript": "^5.8.0",
+    "vitest": "^4.1.10"
+  }
+}

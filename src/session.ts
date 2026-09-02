@@ -1,0 +1,163 @@
+// The unlock session cache.
+//
+// Git runs filters non-interactively, so the key has to already be available
+// when `clean`/`smudge` start. `unlock` performs the interactive part once and
+// caches the result here, for a bounded time.
+// See specs/securegit/07-unlock-session.md.
+
+import { mkdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
+import { homedir } from 'node:os';
+import { randomBytes } from 'node:crypto';
+import { secret } from './crypto.js';
+import type { KeySource } from './filter.js';
+
+export const DEFAULT_TTL_SECONDS = 8 * 3600;
+export const MAX_TTL_SECONDS = 24 * 3600;
+
+/** $XDG_RUNTIME_DIR when set (tmpfs, gone at logout); otherwise ~/.securegit/session. */
+export function resolveSessionPath(
+  repoId: string,
+  env: { XDG_RUNTIME_DIR?: string | undefined },
+  home: string,
+): string {
+  const xdg = env.XDG_RUNTIME_DIR;
+  if (xdg && xdg.length > 0) {
+    return join(xdg, 'securegit', `${repoId}.session`);
+  }
+  return join(home, '.securegit', 'session', `${repoId}.session`);
+}
+
+function defaultPath(repoId: string): string {
+  return resolveSessionPath(repoId, process.env, homedir());
+}
+
+export interface SessionEntry {
+  keyId: string;
+  rmk: Buffer;
+}
+
+interface SessionFile {
+  version: 1;
+  repoId: string;
+  expiresAt: string;
+  current: string | null;
+  keys: Record<string, string>;
+}
+
+export interface WriteSessionOptions {
+  repoId: string;
+  path?: string;
+  entries: SessionEntry[];
+  current: string | null;
+  ttlSeconds?: number;
+  now?: () => Date;
+}
+
+/** Always locked-shaped — a caller never has to null-check the session itself. */
+function lockedKeySource(): KeySource {
+  return {
+    current: () => null,
+    find: () => null,
+    available: () => [],
+  };
+}
+
+function fromSessionFile(file: SessionFile): KeySource {
+  const held = new Map(Object.entries(file.keys).map(([id, hex]) => [id, secret(Buffer.from(hex, 'hex'))]));
+  return {
+    current(): { keyId: string; rmk: Buffer } | null {
+      if (file.current === null) return null;
+      const rmk = held.get(file.current);
+      return rmk ? { keyId: file.current, rmk } : null;
+    },
+    find(keyId: string): Buffer | null {
+      return held.get(keyId) ?? null;
+    },
+    available(): string[] {
+      return [...held.keys()];
+    },
+  };
+}
+
+export async function writeSession(opts: WriteSessionOptions): Promise<void> {
+  const path = opts.path ?? defaultPath(opts.repoId);
+  const now = opts.now ?? ((): Date => new Date());
+  const ttl = Math.min(Math.max(opts.ttlSeconds ?? DEFAULT_TTL_SECONDS, 0), MAX_TTL_SECONDS);
+  const expiresAt = new Date(now().getTime() + ttl * 1000).toISOString();
+
+  const file: SessionFile = {
+    version: 1,
+    repoId: opts.repoId,
+    expiresAt,
+    current: opts.current,
+    keys: Object.fromEntries(opts.entries.map((e) => [e.keyId, e.rmk.toString('hex')])),
+  };
+
+  const dir = dirname(path);
+  await mkdir(dir, { recursive: true, mode: 0o700 });
+  const tmp = `${path}.tmp-${process.pid}-${randomBytes(4).toString('hex')}`;
+  await writeFile(tmp, JSON.stringify(file), { mode: 0o600 });
+  try {
+    await rename(tmp, path);
+  } catch (e) {
+    await unlink(tmp).catch(() => {});
+    throw e;
+  }
+}
+
+export interface ReadSessionOptions {
+  repoId: string;
+  path?: string;
+  now?: () => Date;
+  /** Never receives key material. Defaults to a no-op. */
+  warn?: (message: string) => void;
+}
+
+export async function readSession(opts: ReadSessionOptions): Promise<KeySource> {
+  const path = opts.path ?? defaultPath(opts.repoId);
+  const now = opts.now ?? ((): Date => new Date());
+  const warn = opts.warn ?? ((): void => {});
+
+  let stats;
+  try {
+    stats = await stat(path);
+  } catch {
+    return lockedKeySource(); // no session: an ordinary locked state, not an error
+  }
+
+  if ((stats.mode & 0o077) !== 0) {
+    warn(
+      `securegit: discarding session file with unsafe permissions (${(stats.mode & 0o777).toString(8)})\n` +
+        `  file:   ${path}\n` +
+        `  action: run \`securegit unlock\` again`,
+    );
+    await unlink(path).catch(() => {});
+    return lockedKeySource();
+  }
+
+  let file: SessionFile;
+  try {
+    file = JSON.parse(await readFile(path, 'utf8')) as SessionFile;
+  } catch {
+    // Corrupt or unreadable: fail safe without destroying a file that might
+    // belong to a newer version of this tool.
+    return lockedKeySource();
+  }
+
+  if (file.repoId !== opts.repoId) {
+    return lockedKeySource();
+  }
+
+  if (now().getTime() >= new Date(file.expiresAt).getTime()) {
+    await unlink(path).catch(() => {});
+    return lockedKeySource();
+  }
+
+  return fromSessionFile(file);
+}
+
+export async function lockSession(opts: { repoId: string; path?: string }): Promise<void> {
+  const path = opts.path ?? defaultPath(opts.repoId);
+  await unlink(path).catch(() => {});
+}
