@@ -1,0 +1,183 @@
+# Chaos sandbox — specs/chaotests/01-sandbox.md.
+#
+# Run from the repository root: `npm run chaos:sandbox` (see chaos/README.md
+# for the exact commands and why `remote` never exiting rules out a plain
+# `docker compose up --abort-on-container-exit`).
+#
+# Topology: remote (bare repo, git://) <- collaborator-a, collaborator-b,
+# operator (legitimate actors) <- chaos-4 "virus" paired with
+# collaborator-a's HOME, chaos-6 "infra" paired with collaborator-b
+# (shares its PID + network namespace too, so it can kill its subprocess
+# and drop its network link, not just touch its files) <- chaos-5
+# "attacker", its own container, push-only access to `remote`, no access
+# to any actor. The `verifier` runs last, auditing a fresh clone of
+# `remote` plus the shared run report.
+#
+# `operator` (collaborator-c / actor-3) deliberately gets no paired chaos
+# agent in this v1 — a reasonable first scope, not an oversight (see
+# specs/chaotests/01-sandbox.md).
+
+x-common-env: &common-env
+  REMOTE_URL: git://remote/repo.git
+  BRANCH: main
+  SECUREGIT_PASSPHRASE: correct horse battery staple sandbox edition
+  CHAOS_DURATION_SECONDS: ${CHAOS_DURATION_SECONDS:-300}
+  REPORT_PATH: /report/report.jsonl
+  SHARED_DIR: /shared
+
+services:
+  remote:
+    build:
+      context: ..
+      dockerfile: chaos/Dockerfile
+    command: ["node", "/chaos/remote/entrypoint.mjs"]
+    expose:
+      - "9418"
+    environment:
+      REPO_PATH: /repos/repo.git
+
+  collaborator-a:
+    build:
+      context: ..
+      dockerfile: chaos/Dockerfile
+    command: ["node", "/chaos/actors/driver.mjs"]
+    depends_on: [remote]
+    environment:
+      <<: *common-env
+      SANDBOX_ROLE: collaborator-a
+      HOME: /home/collaborator-a
+      WORK_DIR: /work
+    volumes:
+      - report-data:/report
+      - keyring-shared:/shared
+      - home-actor1:/home/collaborator-a
+
+  collaborator-b:
+    build:
+      context: ..
+      dockerfile: chaos/Dockerfile
+    command: ["node", "/chaos/actors/driver.mjs"]
+    depends_on: [remote, collaborator-a]
+    environment:
+      <<: *common-env
+      SANDBOX_ROLE: collaborator-b
+      HOME: /home/collaborator-b
+      WORK_DIR: /work
+    volumes:
+      - report-data:/report
+      - keyring-shared:/shared
+      - home-actor2:/home/collaborator-b
+
+  operator:
+    build:
+      context: ..
+      dockerfile: chaos/Dockerfile
+    command: ["node", "/chaos/actors/driver.mjs"]
+    depends_on: [remote, collaborator-a]
+    environment:
+      <<: *common-env
+      SANDBOX_ROLE: operator
+      HOME: /home/operator
+      WORK_DIR: /work
+    volumes:
+      - report-data:/report
+      - keyring-shared:/shared
+      - home-actor3:/home/operator
+
+  chaos-4-virus:
+    build:
+      context: ..
+      dockerfile: chaos/Dockerfile
+    command: ["node", "/chaos/agents/virus.mjs"]
+    depends_on: [collaborator-a]
+    environment:
+      SANDBOX_ROLE: chaos-4-virus
+      SANDBOX_TARGET: collaborator-a
+      HOME: /home/collaborator-a
+      REPORT_PATH: /report/report.jsonl
+      CHAOS_DURATION_SECONDS: ${CHAOS_DURATION_SECONDS:-300}
+    volumes:
+      - report-data:/report
+      - home-actor1:/home/collaborator-a
+    # Deliberately NOT mounted: keyring-shared. The virus tampers with
+    # files already inside its target's HOME — it has no more reach than
+    # that, and specifically no reason to touch the cross-actor exchange
+    # volume (see specs/chaotests/01-sandbox.md's Scope guardrails).
+
+  chaos-5-attacker:
+    build:
+      context: ..
+      dockerfile: chaos/Dockerfile
+    command: ["node", "/chaos/agents/attacker.mjs"]
+    depends_on: [remote]
+    environment:
+      SANDBOX_ROLE: chaos-5-attacker
+      REMOTE_URL: git://remote/repo.git
+      BRANCH: main
+      WORK_DIR: /work
+      REPORT_PATH: /report/report.jsonl
+      CHAOS_DURATION_SECONDS: ${CHAOS_DURATION_SECONDS:-300}
+    volumes:
+      - report-data:/report
+    # No HOME/keyring volume of any kind — chaos-5 only ever has ordinary
+    # push access to `remote`, exactly like a real hostile collaborator,
+    # never any actor's local state or key material.
+
+  chaos-6-infra:
+    build:
+      context: ..
+      dockerfile: chaos/Dockerfile
+    command: ["node", "/chaos/agents/infra.mjs"]
+    depends_on: [collaborator-b]
+    # Shares collaborator-b's PID namespace (to find and SIGKILL its
+    # `securegit` subprocess by scanning /proc directly) and network
+    # namespace (so an iptables DROP rule added here affects exactly
+    # collaborator-b's own traffic to `remote`, nothing else's).
+    pid: "service:collaborator-b"
+    network_mode: "service:collaborator-b"
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    environment:
+      SANDBOX_ROLE: chaos-6-infra
+      SANDBOX_TARGET: collaborator-b
+      HOME: /home/collaborator-b
+      REMOTE_HOST: remote
+      REPORT_PATH: /report/report.jsonl
+      CHAOS_DURATION_SECONDS: ${CHAOS_DURATION_SECONDS:-300}
+      DISK_FILL_MB: ${DISK_FILL_MB:-64}
+    volumes:
+      - report-data:/report
+      - home-actor2:/home/collaborator-b
+
+  verifier:
+    build:
+      context: ..
+      dockerfile: chaos/Dockerfile
+    command: ["node", "/chaos/verifier/verify.mjs"]
+    depends_on: [remote, collaborator-a]
+    environment:
+      REMOTE_URL: git://remote/repo.git
+      BRANCH: main
+      CHAOS_DURATION_SECONDS: ${CHAOS_DURATION_SECONDS:-300}
+      VERIFIER_STARTUP_GRACE_SECONDS: ${VERIFIER_STARTUP_GRACE_SECONDS:-30}
+      # The operator's post-loop finalIntegritySelfCheck() (see
+      # chaos/actors/driver.mjs) decrypts every protected blob in history
+      # before it finishes — its own real cost, on top of
+      # CHAOS_DURATION_SECONDS, scaling with how much history the run
+      # accumulated. 60s covers a default-length run comfortably; a much
+      # longer CHAOS_DURATION_SECONDS should raise this too.
+      VERIFIER_SETTLE_SECONDS: ${VERIFIER_SETTLE_SECONDS:-60}
+      REPORT_PATH: /report/report.jsonl
+      VERIFIER_RESULT_PATH: /report/verifier-result.json
+    volumes:
+      - report-data:/report
+    # No HOME/keyring volume — the verifier only ever gets what a real
+    # auditor with repository access (not a workstation) would have.
+
+volumes:
+  report-data: {}
+  keyring-shared: {}
+  home-actor1: {}
+  home-actor2: {}
+  home-actor3: {}

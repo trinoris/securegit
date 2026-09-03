@@ -113,7 +113,20 @@ export async function initConfig(
   };
 
   await mkdir(join(repoDir, '.securegit'), { recursive: true });
-  await writeFile(path, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
+  // Atomic (temp file + rename), same discipline as `setBindPath()` and
+  // `writeKeyringFile()`: a kill mid-write must leave `config.json` either
+  // absent (this repo is still uninitialised, `init` can just be re-run) or
+  // fully valid — never present but torn, which would also block a retry
+  // (`initConfig()`'s own already-exists guard would refuse a re-run
+  // against a file it can't actually read back).
+  const tmp = `${path}.tmp-${process.pid}-${randomBytes(4).toString('hex')}`;
+  await writeFile(tmp, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
+  try {
+    await rename(tmp, path);
+  } catch (e) {
+    await unlink(tmp).catch(() => {});
+    throw e;
+  }
   return config;
 }
 

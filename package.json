@@ -37,7 +37,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
-    "test:integration": "vitest run --config vitest.integration.config.ts"
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "chaos:sandbox": "docker compose -f chaos/docker-compose.yml up --build -d && docker compose -f chaos/docker-compose.yml wait verifier; docker compose -f chaos/docker-compose.yml logs verifier; docker compose -f chaos/docker-compose.yml down -v"
   },
   "keywords": [
     "git",

@@ -1,0 +1,1018 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chaos Match</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Michroma&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Sans+Condensed:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+</head>
+<body>
+<style>
+  /* ---- Tokens: single deliberate world (submarine/spacecraft damage-
+     control board), not adaptive to host theme — a game board has its own
+     art direction, the way a physical control panel doesn't repaint itself
+     for daytime. Every color is still declared explicitly below so the
+     page holds on any host ground. */
+  :root {
+    --bg: #0a0e18;
+    --bg-grid: #0d1220;
+    --panel: #131b30;
+    --panel-raised: #182142;
+    --line: #263156;
+    --text: #eaf0fa;
+    --text-dim: #8ea0c4;
+    --text-faint: #5c6a8c;
+    --hold: #3ecf8e;
+    --hold-dim: #1d5c48;
+    --breach: #ff5c5c;
+    --breach-dim: #6b2733;
+    --warn: #f5b942;
+    --warn-dim: #6b5322;
+    --font-display: 'Michroma', 'IBM Plex Sans', sans-serif;
+    --font-body: 'IBM Plex Sans Condensed', 'IBM Plex Sans', system-ui, sans-serif;
+    --font-mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', monospace;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background:
+      radial-gradient(ellipse 900px 500px at 50% -10%, #16224a 0%, transparent 60%),
+      repeating-linear-gradient(0deg, var(--bg-grid) 0px, var(--bg-grid) 1px, transparent 1px, transparent 28px),
+      repeating-linear-gradient(90deg, var(--bg-grid) 0px, var(--bg-grid) 1px, transparent 1px, transparent 28px),
+      var(--bg);
+    color: var(--text);
+    font-family: var(--font-body);
+    font-size: 15px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { animation-duration: 0.001ms !important; transition-duration: 0.001ms !important; }
+  }
+
+  .board {
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: 20px 20px 28px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  /* ---------- header ---------- */
+  .hud-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 20px;
+    flex-wrap: wrap;
+    padding: 16px 20px;
+    background: linear-gradient(180deg, var(--panel-raised), var(--panel));
+    border: 1px solid var(--line);
+    border-radius: 6px;
+  }
+  .brand { display: flex; align-items: center; gap: 14px; }
+  .brand-mark {
+    width: 40px; height: 40px;
+    display: flex; align-items: center; justify-content: center;
+    border: 1.5px solid var(--hold);
+    color: var(--hold);
+    font-family: var(--font-display);
+    font-size: 16px;
+    border-radius: 4px;
+    box-shadow: 0 0 16px -2px rgba(62, 207, 142, 0.55);
+    flex: none;
+  }
+  .brand-text h1 {
+    font-family: var(--font-display);
+    font-size: 17px;
+    letter-spacing: 0.06em;
+    margin: 0;
+    text-wrap: balance;
+  }
+  .brand-sub {
+    margin: 4px 0 0;
+    color: var(--text-dim);
+    font-size: 12.5px;
+    letter-spacing: 0.02em;
+  }
+  .run-meta { display: flex; gap: 26px; }
+  .meta-item { display: flex; flex-direction: column; gap: 3px; align-items: flex-end; }
+  .meta-label {
+    font-size: 10.5px;
+    letter-spacing: 0.12em;
+    color: var(--text-faint);
+    text-transform: uppercase;
+  }
+  .meta-value {
+    font-family: var(--font-mono);
+    font-size: 14px;
+    color: var(--text);
+  }
+  .meta-value.tabular { font-variant-numeric: tabular-nums; }
+  #sourceLabel.is-live { color: var(--warn); }
+
+  /* ---------- transport ---------- */
+  .transport {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+    padding: 10px 14px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+  }
+  .transport-btn, .load-btn, .speed-btn {
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    letter-spacing: 0.03em;
+    background: var(--panel-raised);
+    color: var(--text);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 8px 14px;
+    cursor: pointer;
+    transition: border-color 120ms ease, color 120ms ease;
+  }
+  .transport-btn:hover, .load-btn:hover, .speed-btn:hover { border-color: var(--text-dim); }
+  .transport-btn:focus-visible, .load-btn:focus-visible, .speed-btn:focus-visible,
+  #scrub:focus-visible {
+    outline: 2px solid var(--hold);
+    outline-offset: 2px;
+  }
+  .transport-btn.primary { border-color: var(--hold); color: var(--hold); }
+  .speed-group { display: flex; gap: 4px; }
+  .speed-btn.active { border-color: var(--hold); color: var(--hold); }
+  .load-btn { display: inline-flex; align-items: center; }
+  #scrub {
+    flex: 1;
+    min-width: 140px;
+    accent-color: var(--hold);
+  }
+
+  /* ---------- arena ---------- */
+  .arena {
+    display: grid;
+    grid-template-columns: 300px 1fr 300px;
+    gap: 14px;
+    align-items: start;
+  }
+  @media (max-width: 980px) {
+    .arena { grid-template-columns: 1fr; }
+  }
+  .roster, .log-panel {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 14px;
+  }
+  .roster-title {
+    font-family: var(--font-display);
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    color: var(--text-dim);
+    margin: 0 0 12px;
+  }
+  .roster.hostile .roster-title { color: #c98b8b; }
+  .roster-list { display: flex; flex-direction: column; gap: 10px; }
+
+  .unit-card {
+    display: grid;
+    grid-template-columns: 34px 1fr;
+    gap: 10px;
+    padding: 10px;
+    background: var(--panel-raised);
+    border: 1px solid var(--line);
+    border-radius: 5px;
+    position: relative;
+    overflow: hidden;
+    transition: border-color 160ms ease, box-shadow 160ms ease;
+  }
+  .unit-card.hit-flash { border-color: var(--breach); box-shadow: 0 0 0 1px var(--breach), 0 0 18px -4px var(--breach); }
+  .unit-card.heal-flash { border-color: var(--hold); box-shadow: 0 0 0 1px var(--hold), 0 0 18px -4px var(--hold); }
+  .unit-badge {
+    width: 34px; height: 34px;
+    border-radius: 4px;
+    display: flex; align-items: center; justify-content: center;
+    font-family: var(--font-display);
+    font-size: 13px;
+    border: 1px solid var(--line);
+  }
+  .roster.friendly .unit-badge { color: var(--hold); border-color: var(--hold-dim); }
+  .roster.hostile .unit-badge { color: var(--breach); border-color: var(--breach-dim); }
+  .unit-info { min-width: 0; }
+  .unit-name-row { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+  .unit-name {
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .unit-round {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-faint);
+    flex: none;
+  }
+  .unit-status {
+    font-size: 11px;
+    color: var(--text-dim);
+    margin-top: 1px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .unit-bar {
+    margin-top: 7px;
+    height: 5px;
+    background: #0c1226;
+    border-radius: 3px;
+    overflow: hidden;
+    border: 1px solid var(--line);
+  }
+  .unit-bar-fill {
+    height: 100%;
+    background: linear-gradient(90deg, var(--hold-dim), var(--hold));
+    width: 100%;
+    transition: width 380ms cubic-bezier(.4,0,.2,1);
+  }
+  .roster.hostile .unit-bar-fill { background: linear-gradient(90deg, var(--breach-dim), var(--breach)); }
+  .unit-last {
+    margin-top: 7px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-faint);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  /* ---------- log ---------- */
+  .log-panel { min-height: 420px; display: flex; flex-direction: column; }
+  .log-list {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    max-height: 480px;
+    overflow-y: auto;
+    padding-right: 2px;
+  }
+  .log-entry {
+    display: grid;
+    grid-template-columns: 14px 1fr;
+    gap: 10px;
+    padding: 6px 0;
+    animation: log-in 220ms ease both;
+  }
+  @keyframes log-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+  .log-rail { position: relative; display: flex; justify-content: center; }
+  .log-rail::before {
+    content: ''; position: absolute; top: -6px; bottom: -6px; width: 1px; background: var(--line);
+  }
+  .log-entry:first-child .log-rail::before { top: 50%; }
+  .log-dot {
+    position: relative; z-index: 1;
+    width: 8px; height: 8px; border-radius: 50%;
+    margin-top: 4px;
+    background: var(--text-faint);
+    box-shadow: 0 0 0 3px var(--panel);
+  }
+  .log-entry.sev-friendly .log-dot { background: var(--hold); }
+  .log-entry.sev-hostile .log-dot { background: var(--breach); }
+  .log-entry.sev-warn .log-dot { background: var(--warn); }
+  .log-entry.sev-scan .log-dot { background: #7fb8ff; }
+  .log-entry.sev-done .log-dot { background: var(--text-faint); }
+  .log-body { min-width: 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; font-size: 12px; }
+  .log-time { font-family: var(--font-mono); color: var(--text-faint); font-variant-numeric: tabular-nums; }
+  .log-who { font-family: var(--font-mono); color: var(--text-dim); }
+  .log-tag {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    letter-spacing: 0.06em;
+    padding: 1px 6px;
+    border-radius: 3px;
+    border: 1px solid var(--line);
+    color: var(--text-dim);
+  }
+  .log-entry.sev-friendly .log-tag { color: var(--hold); border-color: var(--hold-dim); }
+  .log-entry.sev-hostile .log-tag { color: var(--breach); border-color: var(--breach-dim); }
+  .log-entry.sev-warn .log-tag { color: var(--warn); border-color: var(--warn-dim); }
+  .log-entry.sev-scan .log-tag { color: #7fb8ff; border-color: #294a75; }
+  .log-text { color: var(--text); font-family: var(--font-mono); font-size: 12px; }
+  .log-empty { color: var(--text-faint); font-size: 12.5px; padding: 8px 0 0; }
+
+  /* ---------- invariants ---------- */
+  .invariants {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 14px;
+  }
+  @media (max-width: 780px) { .invariants { grid-template-columns: 1fr; } }
+  .invariant-gauge {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 14px 16px;
+  }
+  .gauge-label {
+    display: flex; flex-direction: column; gap: 2px;
+    font-family: var(--font-display);
+    font-size: 11.5px;
+    letter-spacing: 0.08em;
+    color: var(--text);
+    margin-bottom: 9px;
+  }
+  .gauge-sub {
+    font-family: var(--font-body);
+    font-size: 11px;
+    letter-spacing: normal;
+    color: var(--text-faint);
+    text-transform: none;
+  }
+  .gauge-bar {
+    height: 8px;
+    background: #0c1226;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  .gauge-fill {
+    height: 100%;
+    width: 100%;
+    background: linear-gradient(90deg, var(--hold-dim), var(--hold));
+    transition: width 420ms ease, background 240ms ease;
+  }
+  .invariant-gauge.pending .gauge-fill { background: repeating-linear-gradient(45deg, var(--warn-dim), var(--warn-dim) 6px, var(--warn) 6px, var(--warn) 12px); width: 55%; }
+  .invariant-gauge.breach .gauge-fill { background: var(--breach); width: 100%; }
+  .gauge-state {
+    margin-top: 8px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.05em;
+    color: var(--hold);
+  }
+  .invariant-gauge.pending .gauge-state { color: var(--warn); }
+  .invariant-gauge.breach .gauge-state { color: var(--breach); }
+
+  /* ---------- resolution ---------- */
+  .resolution-banner {
+    padding: 22px 24px;
+    border-radius: 6px;
+    border: 1px solid var(--hold-dim);
+    background: linear-gradient(180deg, rgba(62,207,142,0.10), rgba(62,207,142,0.02));
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+    animation: resolve-in 340ms cubic-bezier(.2,.8,.2,1) both;
+  }
+  .resolution-banner.breach { border-color: var(--breach-dim); background: linear-gradient(180deg, rgba(255,92,92,0.12), rgba(255,92,92,0.02)); }
+  @keyframes resolve-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+  .resolution-title { font-family: var(--font-display); font-size: 11px; letter-spacing: 0.14em; color: var(--text-dim); }
+  .resolution-verdict { font-family: var(--font-display); font-size: 19px; letter-spacing: 0.03em; color: var(--hold); text-wrap: balance; }
+  .resolution-banner.breach .resolution-verdict { color: var(--breach); }
+  .resolution-detail { font-family: var(--font-mono); font-size: 12px; color: var(--text-dim); }
+
+  .footnote {
+    text-align: center;
+    color: var(--text-faint);
+    font-size: 11.5px;
+    padding-top: 4px;
+  }
+  .footnote a { color: var(--text-dim); }
+
+  /* scrollbar, webkit only — cosmetic, degrades fine elsewhere */
+  .log-list::-webkit-scrollbar { width: 8px; }
+  .log-list::-webkit-scrollbar-track { background: transparent; }
+  .log-list::-webkit-scrollbar-thumb { background: var(--line); border-radius: 4px; }
+</style>
+
+<div class="board">
+  <header class="hud-header">
+    <div class="brand">
+      <div class="brand-mark">&#9670;</div>
+      <div class="brand-text">
+        <h1>CHAOS MATCH</h1>
+        <p class="brand-sub">securegit resilience sandbox &mdash; replay viewer</p>
+      </div>
+    </div>
+    <div class="run-meta">
+      <div class="meta-item"><span class="meta-label">Source</span><span class="meta-value" id="sourceLabel">demo match</span></div>
+      <div class="meta-item"><span class="meta-label">Round</span><span class="meta-value tabular" id="roundLabel">0 / 0</span></div>
+      <div class="meta-item"><span class="meta-label">Elapsed</span><span class="meta-value tabular" id="elapsedLabel">t+00:00</span></div>
+    </div>
+  </header>
+
+  <div class="transport">
+    <button id="playBtn" class="transport-btn primary" type="button">&#9658; Play</button>
+    <input id="scrub" type="range" min="0" max="0" value="0" aria-label="Scrub match timeline">
+    <div class="speed-group" role="group" aria-label="Playback speed">
+      <button class="speed-btn active" data-speed="1" type="button">1&times;</button>
+      <button class="speed-btn" data-speed="3" type="button">3&times;</button>
+      <button class="speed-btn" data-speed="8" type="button">8&times;</button>
+    </div>
+    <label class="load-btn">
+      Load report<input id="fileInput" type="file" accept=".jsonl,.json,.log,.txt" hidden>
+    </label>
+    <button id="demoBtn" class="transport-btn" type="button">&#8635; New demo match</button>
+  </div>
+
+  <main class="arena">
+    <section class="roster friendly" aria-label="Friendly systems">
+      <h2 class="roster-title">FRIENDLY SYSTEMS</h2>
+      <div id="friendlyRoster" class="roster-list"></div>
+    </section>
+
+    <section class="log-panel" aria-label="Match log">
+      <h2 class="roster-title">COMMIT LOG</h2>
+      <div id="logList" class="log-list"><p class="log-empty">Waiting for the match to start&hellip;</p></div>
+    </section>
+
+    <section class="roster hostile" aria-label="Hostile contacts">
+      <h2 class="roster-title">HOSTILE CONTACTS</h2>
+      <div id="hostileRoster" class="roster-list"></div>
+    </section>
+  </main>
+
+  <footer class="invariants">
+    <div class="invariant-gauge pending" id="gauge-plaintext">
+      <div class="gauge-label">CONTAINMENT<span class="gauge-sub">no plaintext ever leaked</span></div>
+      <div class="gauge-bar"><div class="gauge-fill"></div></div>
+      <div class="gauge-state">AWAITING AUDIT</div>
+    </div>
+    <div class="invariant-gauge pending" id="gauge-integrity">
+      <div class="gauge-label">HULL INTEGRITY<span class="gauge-sub">git fsck &mdash; object graph intact</span></div>
+      <div class="gauge-bar"><div class="gauge-fill"></div></div>
+      <div class="gauge-state">AWAITING AUDIT</div>
+    </div>
+    <div class="invariant-gauge pending" id="gauge-dataloss">
+      <div class="gauge-label">DATA RECOVERY<span class="gauge-sub">zero commits or blobs lost</span></div>
+      <div class="gauge-bar"><div class="gauge-fill"></div></div>
+      <div class="gauge-state">AWAITING AUDIT</div>
+    </div>
+  </footer>
+
+  <div id="resolutionBanner" class="resolution-banner" hidden>
+    <div>
+      <div class="resolution-title">MATCH RESOLVED</div>
+      <div class="resolution-verdict" id="resolutionVerdict">&mdash;</div>
+    </div>
+    <div class="resolution-detail" id="resolutionDetail"></div>
+  </div>
+
+  <p class="footnote">Reads <code>chaos/report.jsonl</code> or <code>verifier-result.json</code> from a real sandbox run &mdash; see <code>specs/chaotests/01-sandbox.md</code>. Nothing here is uploaded; the file never leaves your browser.</p>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  var FRIENDLY_IDS = ['collaborator-a', 'collaborator-b', 'operator'];
+  var HOSTILE_IDS = ['chaos-4-virus', 'chaos-5-attacker', 'chaos-6-infra'];
+  var TARGET_OF = { 'chaos-4-virus': 'collaborator-a', 'chaos-6-infra': 'collaborator-b', 'chaos-5-attacker': null };
+
+  var ROSTER_META = {
+    'collaborator-a': { badge: 'A', label: 'collaborator-a', sub: 'collaborator' },
+    'collaborator-b': { badge: 'B', label: 'collaborator-b', sub: 'collaborator' },
+    'operator': { badge: 'OP', label: 'operator', sub: 'key rotation & audit' },
+    'chaos-4-virus': { badge: '4', label: 'chaos-4 &middot; virus', sub: 'file corruption' },
+    'chaos-5-attacker': { badge: '5', label: 'chaos-5 &middot; attacker', sub: 'hostile push access' },
+    'chaos-6-infra': { badge: '6', label: 'chaos-6 &middot; infra', sub: 'process / disk / network faults' }
+  };
+
+  var state = {
+    events: [],
+    index: 0,
+    playing: false,
+    speed: 1,
+    combatants: {},
+    finalAudit: null, // {plaintext, integrity, dataLoss} each 'secure'|'breach'
+    resolved: false
+  };
+
+  function freshCombatants() {
+    var c = {};
+    FRIENDLY_IDS.concat(HOSTILE_IDS).forEach(function (id) {
+      c[id] = {
+        id: id,
+        friendly: FRIENDLY_IDS.indexOf(id) !== -1,
+        round: 0,
+        bar: 100,
+        attempts: 0,
+        landed: 0,
+        status: 'standing by',
+        last: '—',
+        done: false
+      };
+    });
+    return c;
+  }
+
+  // ---------- rendering ----------
+
+  var friendlyRosterEl = document.getElementById('friendlyRoster');
+  var hostileRosterEl = document.getElementById('hostileRoster');
+  var logListEl = document.getElementById('logList');
+  var roundLabelEl = document.getElementById('roundLabel');
+  var elapsedLabelEl = document.getElementById('elapsedLabel');
+  var sourceLabelEl = document.getElementById('sourceLabel');
+  var scrubEl = document.getElementById('scrub');
+  var playBtn = document.getElementById('playBtn');
+
+  function fmtClock(seconds) {
+    seconds = Math.max(0, Math.round(seconds));
+    var m = Math.floor(seconds / 60);
+    var s = seconds % 60;
+    return 't+' + String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0');
+  }
+
+  function buildRosterCard(id) {
+    var meta = ROSTER_META[id];
+    var card = document.createElement('div');
+    card.className = 'unit-card';
+    card.dataset.id = id;
+    card.innerHTML =
+      '<div class="unit-badge">' + meta.badge + '</div>' +
+      '<div class="unit-info">' +
+        '<div class="unit-name-row"><span class="unit-name">' + meta.label + '</span><span class="unit-round" data-f="round">&mdash;</span></div>' +
+        '<div class="unit-status" data-f="status">standing by</div>' +
+        '<div class="unit-bar"><div class="unit-bar-fill" data-f="bar" style="width:100%"></div></div>' +
+        '<div class="unit-last" data-f="last">' + meta.sub + '</div>' +
+      '</div>';
+    return card;
+  }
+
+  function initRosters() {
+    friendlyRosterEl.innerHTML = '';
+    hostileRosterEl.innerHTML = '';
+    FRIENDLY_IDS.forEach(function (id) { friendlyRosterEl.appendChild(buildRosterCard(id)); });
+    HOSTILE_IDS.forEach(function (id) { hostileRosterEl.appendChild(buildRosterCard(id)); });
+  }
+
+  function cardFor(id) {
+    return document.querySelector('.unit-card[data-id="' + id + '"]');
+  }
+
+  function paintCombatant(id) {
+    var c = state.combatants[id];
+    var card = cardFor(id);
+    if (!card || !c) return;
+    card.querySelector('[data-f="round"]').textContent = c.round ? ('R' + c.round) : '—';
+    card.querySelector('[data-f="bar"]').style.width = c.bar + '%';
+    card.querySelector('[data-f="last"]').textContent = c.last;
+    var statusEl = card.querySelector('[data-f="status"]');
+    if (c.done) {
+      statusEl.textContent = 'stood down';
+    } else if (c.friendly) {
+      statusEl.textContent = c.status;
+    } else {
+      statusEl.textContent = c.attempts + ' attempt' + (c.attempts === 1 ? '' : 's') + ' · ' + c.landed + ' landed';
+    }
+  }
+
+  function flash(id, kind) {
+    var card = cardFor(id);
+    if (!card) return;
+    var cls = kind === 'hit' ? 'hit-flash' : 'heal-flash';
+    card.classList.remove('hit-flash', 'heal-flash');
+    void card.offsetWidth; // restart animation
+    card.classList.add(cls);
+    setTimeout(function () { card.classList.remove(cls); }, 520);
+  }
+
+  function appendLog(ev) {
+    logListEl.querySelectorAll('.log-empty').forEach(function (n) { n.remove(); });
+    var entry = document.createElement('div');
+    entry.className = 'log-entry sev-' + ev.kind;
+    entry.innerHTML =
+      '<div class="log-rail"><span class="log-dot"></span></div>' +
+      '<div class="log-body">' +
+        '<span class="log-time">' + fmtClock(ev.t) + '</span>' +
+        '<span class="log-who">' + ev.combatantId + '</span>' +
+        '<span class="log-tag">' + ev.tag + '</span>' +
+        '<span class="log-text">' + ev.text + '</span>' +
+      '</div>';
+    logListEl.appendChild(entry);
+    logListEl.scrollTop = logListEl.scrollHeight;
+  }
+
+  function setGauge(which, level, note) {
+    var el = document.getElementById('gauge-' + which);
+    el.classList.remove('pending', 'breach');
+    var stateEl = el.querySelector('.gauge-state');
+    if (level === 'secure') { stateEl.textContent = note || 'SECURE'; }
+    else if (level === 'breach') { el.classList.add('breach'); stateEl.textContent = note || 'BREACH'; }
+    else { el.classList.add('pending'); stateEl.textContent = note || 'AWAITING AUDIT'; }
+  }
+
+  function resolveMatch() {
+    if (state.resolved) return;
+    state.resolved = true;
+    var banner = document.getElementById('resolutionBanner');
+    var verdictEl = document.getElementById('resolutionVerdict');
+    var detailEl = document.getElementById('resolutionDetail');
+    var audit = state.finalAudit || {};
+
+    if (audit.plaintext) setGauge('plaintext', audit.plaintext);
+    if (audit.integrity) setGauge('integrity', audit.integrity);
+    if (audit.dataLoss) setGauge('dataloss', audit.dataLoss);
+
+    var values = [audit.plaintext, audit.integrity, audit.dataLoss];
+    var anyBreach = values.indexOf('breach') !== -1;
+    var allSecure = values.every(function (v) { return v === 'secure'; });
+
+    banner.hidden = false;
+    banner.classList.toggle('breach', anyBreach);
+    if (anyBreach) {
+      verdictEl.textContent = 'INVARIANT VIOLATED — REVIEW FINDINGS';
+    } else if (allSecure) {
+      verdictEl.textContent = 'ALL THREE INVARIANTS HELD';
+    } else {
+      verdictEl.textContent = 'MATCH COMPLETE — AUDIT INCOMPLETE';
+    }
+    detailEl.textContent = state.replayOnly
+      ? 'zero-data-loss checked from operator self-report · containment/integrity need a verifier-result.json audit'
+      : (allSecure ? 'no plaintext leaked · repository intact · nothing lost' : 'see gauges above');
+  }
+
+  // ---------- playback ----------
+
+  function applyEvent(ev) {
+    var c = state.combatants[ev.combatantId];
+    if (!c) return;
+    if (ev.round != null) c.round = Math.max(c.round, ev.round);
+    c.last = ev.text;
+    if (ev.kind === 'hostile') { c.attempts++; c.landed++; }
+    if (ev.kind === 'neutral' && ev.wasAttempt) { c.attempts++; }
+    if (ev.done) { c.done = true; c.status = 'stood down'; }
+    if (!c.done && c.friendly) c.status = 'active';
+
+    if (ev.hitTargetId && state.combatants[ev.hitTargetId]) {
+      var t = state.combatants[ev.hitTargetId];
+      t.bar = Math.max(18, t.bar - (12 + Math.random() * 12));
+      flash(ev.hitTargetId, 'hit');
+    }
+    if (ev.healTargetId && state.combatants[ev.healTargetId]) {
+      var h = state.combatants[ev.healTargetId];
+      h.bar = Math.min(100, h.bar + (10 + Math.random() * 18));
+      flash(ev.healTargetId, 'heal');
+    }
+
+    paintCombatant(ev.combatantId);
+    if (ev.hitTargetId) paintCombatant(ev.hitTargetId);
+    if (ev.healTargetId) paintCombatant(ev.healTargetId);
+
+    appendLog(ev);
+
+    if (ev.finalCheck) {
+      var dataLossHeld = (ev.finalCheck.missingCommits || 0) === 0 && (ev.finalCheck.decryptFailures || 0) === 0;
+      setGauge('dataloss', dataLossHeld ? 'secure' : 'breach', dataLossHeld ? 'SECURE · ' + ev.finalCheck.blobsChecked + ' blobs' : (ev.finalCheck.missingCommits + ev.finalCheck.decryptFailures) + ' finding(s)');
+      if (!state.finalAudit) state.finalAudit = { plaintext: 'pending', integrity: 'pending', dataLoss: 'pending' };
+      state.finalAudit.dataLoss = dataLossHeld ? 'secure' : 'breach';
+    }
+    if (ev.audit) {
+      state.finalAudit = ev.audit;
+    }
+
+    var maxRound = 0;
+    FRIENDLY_IDS.forEach(function (id) { maxRound = Math.max(maxRound, state.combatants[id].round); });
+    roundLabelEl.textContent = maxRound + ' / ' + state.totalRounds;
+    elapsedLabelEl.textContent = fmtClock(ev.t);
+  }
+
+  function stepTo(newIndex) {
+    newIndex = Math.max(0, Math.min(state.events.length, newIndex));
+    if (newIndex < state.index) {
+      // scrubbed backward — rebuild from scratch, cheap enough at this scale
+      state.combatants = freshCombatants();
+      state.finalAudit = null;
+      state.resolved = false;
+      logListEl.innerHTML = '';
+      document.getElementById('resolutionBanner').hidden = true;
+      setGauge('plaintext', 'pending');
+      setGauge('integrity', 'pending');
+      setGauge('dataloss', 'pending');
+      FRIENDLY_IDS.concat(HOSTILE_IDS).forEach(paintCombatant);
+      state.index = 0;
+    }
+    while (state.index < newIndex) {
+      applyEvent(state.events[state.index]);
+      state.index++;
+    }
+    scrubEl.value = state.index;
+    if (state.index >= state.events.length) {
+      resolveMatch();
+      pause();
+    }
+  }
+
+  var timer = null;
+  function play() {
+    if (state.events.length === 0) return;
+    if (state.index >= state.events.length) stepTo(0);
+    state.playing = true;
+    playBtn.textContent = '⏸ Pause';
+    tick();
+  }
+  function pause() {
+    state.playing = false;
+    playBtn.textContent = '▶ Play';
+    if (timer) clearTimeout(timer);
+  }
+  function tick() {
+    if (!state.playing) return;
+    if (state.index >= state.events.length) { resolveMatch(); pause(); return; }
+    stepTo(state.index + 1);
+    var delay = Math.max(40, 340 / state.speed);
+    timer = setTimeout(tick, delay);
+  }
+
+  playBtn.addEventListener('click', function () {
+    if (state.playing) pause(); else play();
+  });
+  scrubEl.addEventListener('input', function () {
+    pause();
+    stepTo(Number(scrubEl.value));
+  });
+  document.querySelectorAll('.speed-btn').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      document.querySelectorAll('.speed-btn').forEach(function (b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      state.speed = Number(btn.dataset.speed);
+    });
+  });
+
+  // ---------- loading a match ----------
+
+  function loadEvents(events, opts) {
+    pause();
+    state.events = events;
+    state.index = 0;
+    state.combatants = freshCombatants();
+    state.finalAudit = null;
+    state.resolved = false;
+    state.replayOnly = !!(opts && opts.replayOnly);
+    state.totalRounds = 0;
+    events.forEach(function (e) { if (e.round != null) state.totalRounds = Math.max(state.totalRounds, e.round); });
+    logListEl.innerHTML = '<p class="log-empty">Waiting for the match to start&hellip;</p>';
+    scrubEl.max = events.length;
+    scrubEl.value = 0;
+    roundLabelEl.textContent = '0 / ' + state.totalRounds;
+    elapsedLabelEl.textContent = 't+00:00';
+    document.getElementById('resolutionBanner').hidden = true;
+    setGauge('plaintext', 'pending');
+    setGauge('integrity', 'pending');
+    setGauge('dataloss', 'pending');
+    initRosters();
+    FRIENDLY_IDS.concat(HOSTILE_IDS).forEach(paintCombatant);
+    sourceLabelEl.textContent = opts && opts.label ? opts.label : 'match loaded';
+    sourceLabelEl.classList.toggle('is-live', !!(opts && opts.live));
+    if (opts && opts.autoplay) play();
+  }
+
+  function showSnapshot(result) {
+    pause();
+    state.events = [];
+    state.combatants = freshCombatants();
+    initRosters();
+    var summary = (result.reportSummary && result.reportSummary.byRole) || {};
+    Object.keys(summary).forEach(function (id) {
+      var c = state.combatants[id];
+      if (!c) return;
+      c.round = summary[id].roundsCompleted || 0;
+      c.done = true;
+      c.status = 'stood down';
+      c.last = summary[id].actions + ' actions · ' + summary[id].errors + ' errors';
+      if (!c.friendly) { c.attempts = summary[id].actions || 0; }
+    });
+    FRIENDLY_IDS.concat(HOSTILE_IDS).forEach(paintCombatant);
+    logListEl.innerHTML = '<p class="log-empty">Snapshot loaded from verifier-result.json — no event timeline in this file, only the final audit.</p>';
+    scrubEl.max = 0; scrubEl.value = 0;
+    roundLabelEl.textContent = 'final';
+    elapsedLabelEl.textContent = '—';
+    sourceLabelEl.textContent = 'verifier-result.json';
+    sourceLabelEl.classList.add('is-live');
+
+    var inv = result.invariants || {};
+    setGauge('plaintext', inv.noPlaintextLeaked ? 'secure' : 'breach');
+    setGauge('integrity', inv.repositoryIntact ? 'secure' : 'breach');
+    setGauge('dataloss', inv.zeroDataLoss ? 'secure' : 'breach');
+    state.finalAudit = {
+      plaintext: inv.noPlaintextLeaked ? 'secure' : 'breach',
+      integrity: inv.repositoryIntact ? 'secure' : 'breach',
+      dataLoss: inv.zeroDataLoss ? 'secure' : 'breach'
+    };
+    state.replayOnly = false;
+    state.resolved = false;
+    resolveMatch();
+  }
+
+  // ---------- classify a real report.jsonl line into a game event ----------
+
+  function shortSha(sha) { return sha ? String(sha).slice(0, 7) : '—'; }
+  function shortPath(p) { return p ? String(p).split('/').slice(-2).join('/') : '(unknown)'; }
+  function roundOf(msg) {
+    var m = /round\s+(\d+)/i.exec(msg || '');
+    return m ? Number(m[1]) : null;
+  }
+
+  function classifyRealEvent(raw, t) {
+    var role = raw.role, msg = raw.message || '';
+    var base = { t: t, combatantId: role, round: roundOf(msg) };
+
+    if (role === 'chaos-4-virus' || role === 'chaos-6-infra') {
+      var target = TARGET_OF[role];
+      if (/^(virus|infra) round/.test(msg)) {
+        var hit = raw.attempted === true;
+        var actionName = raw.action || (raw.technique) || (msg.split(':')[1] || '').trim().split(' ')[0];
+        return Object.assign(base, {
+          kind: hit ? 'hostile' : 'neutral',
+          wasAttempt: true,
+          tag: hit ? 'CORRUPT' : 'MISS',
+          text: hit ? (String(actionName).toUpperCase() + (raw.path ? ' → ' + shortPath(raw.path) : '')) : (raw.reason || 'no effect'),
+          hitTargetId: hit ? target : null
+        });
+      }
+      if (msg.indexOf('run complete') !== -1) return Object.assign(base, { kind: 'done', done: true, tag: 'STAND DOWN', text: (raw.rounds || 0) + ' rounds' });
+      return Object.assign(base, { kind: 'neutral', tag: role.toUpperCase(), text: msg });
+    }
+
+    if (role === 'chaos-5-attacker') {
+      if (msg.indexOf('attack round') === 0) {
+        var landed = raw.attempted === true;
+        var tech = raw.technique || 'ATTACK';
+        return Object.assign(base, {
+          kind: landed ? 'hostile' : 'neutral',
+          wasAttempt: true,
+          tag: landed ? tech + ' LANDED' : 'BLOCKED',
+          text: landed ? (tech === 'T1' ? 'gitattributes downgraded' : tech === 'T3' ? 'blob relocated' : tech === 'T4' ? 'blob rolled back' : 'hostile recipient added') : (raw.reason || 'push rejected')
+          // no hitTargetId — the attacker targets the shared remote, not
+          // any one collaborator's own systems (see specs/chaotests/
+          // 01-sandbox.md: it only ever acts through ordinary git push)
+        });
+      }
+      if (msg.indexOf('run complete') !== -1) return Object.assign(base, { kind: 'done', done: true, tag: 'STAND DOWN', text: (raw.rounds || 0) + ' rounds' });
+      return Object.assign(base, { kind: 'neutral', tag: 'ATTACKER', text: msg });
+    }
+
+    // friendly roles
+    if (msg.indexOf('push (round') === 0) {
+      var ok = raw.code === 0;
+      return Object.assign(base, {
+        kind: ok ? 'friendly' : 'warn',
+        tag: ok ? 'PUSH' : 'BLOCKED',
+        text: ok ? ('commit ' + shortSha(raw.commit)) : 'non-fast-forward, retrying',
+        healTargetId: ok ? role : null
+      });
+    }
+    if (msg.indexOf('key rotate') === 0) {
+      var rok = raw.code === 0;
+      return Object.assign(base, { kind: rok ? 'friendly' : 'warn', tag: 'ROTATE', text: rok ? 'new generation wrapped' : 'refused this round', healTargetId: rok ? role : null });
+    }
+    if (msg === 'final integrity self-check') {
+      return Object.assign(base, {
+        kind: 'scan', tag: 'SCAN', text: (raw.blobsChecked || 0) + ' blobs decrypted, ' + ((raw.missingCommits || []).length + (raw.decryptFailures || []).length) + ' finding(s)',
+        finalCheck: { blobsChecked: raw.blobsChecked || 0, missingCommits: (raw.missingCommits || []).length, decryptFailures: (raw.decryptFailures || []).length }
+      });
+    }
+    if (msg.indexOf('run complete') !== -1) return Object.assign(base, { kind: 'done', done: true, tag: 'STAND DOWN', text: (raw.rounds || 0) + ' rounds' });
+    if (raw.kind === 'error') return Object.assign(base, { kind: 'warn', tag: 'ERROR', text: msg });
+    return Object.assign(base, { kind: 'neutral', tag: (raw.kind || 'log').toUpperCase(), text: msg });
+  }
+
+  function parseJsonl(text) {
+    var lines = text.split('\n').map(function (l) { return l.trim(); }).filter(Boolean);
+    var raws = [];
+    lines.forEach(function (line) {
+      try { raws.push(JSON.parse(line)); } catch (e) { /* skip a torn line */ }
+    });
+    raws.sort(function (a, b) { return Date.parse(a.ts) - Date.parse(b.ts); });
+    var t0 = raws.length ? Date.parse(raws[0].ts) : Date.now();
+    return raws
+      .filter(function (r) { return ROSTER_META[r.role]; })
+      .map(function (r) { return classifyRealEvent(r, (Date.parse(r.ts) - t0) / 1000); });
+  }
+
+  // ---------- demo generator (real message shapes, synthetic data) ----------
+
+  function hex(n) {
+    var s = '';
+    for (var i = 0; i < n; i++) s += Math.floor(Math.random() * 16).toString(16);
+    return s;
+  }
+
+  function generateDemo() {
+    var events = [];
+    var t = 0;
+    var ROUNDS = 9;
+    var pushedCount = 0;
+
+    function push(id, round, kind, tag, text, extra) {
+      t += 2 + Math.random() * 5;
+      events.push(Object.assign({ t: t, combatantId: id, round: round, kind: kind, tag: tag, text: text }, extra || {}));
+    }
+
+    for (var r = 1; r <= ROUNDS; r++) {
+      ['collaborator-a', 'collaborator-b'].forEach(function (id) {
+        pushedCount++;
+        push(id, r, 'friendly', 'PUSH', 'commit ' + hex(7), { healTargetId: id });
+      });
+      push('operator', r, 'friendly', 'VERIFY', 'status + access scan clean');
+      if (r % 3 === 0) {
+        push('operator', r, 'friendly', 'ROTATE', 'generation ' + (Math.floor(r / 3) + 1) + ' wrapped', { healTargetId: 'operator' });
+      }
+      if (Math.random() < 0.55) {
+        var vActions = ['bitflip', 'truncate', 'delete', 'overwrite'];
+        var va = vActions[Math.floor(Math.random() * vActions.length)];
+        var vFiles = ['keyring.json', 'session/91c2.session', 'identity.json'];
+        push('chaos-4-virus', r, 'hostile', 'CORRUPT', va.toUpperCase() + ' → ' + vFiles[Math.floor(Math.random() * vFiles.length)], { wasAttempt: true, hitTargetId: 'collaborator-a' });
+      } else {
+        push('chaos-4-virus', r, 'neutral', 'MISS', 'no target file found', { wasAttempt: true });
+      }
+      if (Math.random() < 0.5) {
+        var iActions = ['killMidOperation', 'fillDisk', 'revokePermissions', 'dropNetworkLink'];
+        var ia = iActions[Math.floor(Math.random() * iActions.length)];
+        push('chaos-6-infra', r, 'hostile', 'FAULT', ia + ' applied', { wasAttempt: true, hitTargetId: 'collaborator-b' });
+      } else {
+        push('chaos-6-infra', r, 'neutral', 'MISS', 'no live process to hit', { wasAttempt: true });
+      }
+      if (r % 2 === 0) {
+        var techs = [
+          ['T1', 'gitattributes downgraded'],
+          ['T3', 'blob relocated'],
+          ['T4', 'blob rolled back'],
+          ['T5', 'hostile recipient added']
+        ];
+        var pick = techs[Math.floor(Math.random() * techs.length)];
+        if (Math.random() < 0.7) {
+          push('chaos-5-attacker', r, 'hostile', pick[0] + ' LANDED', pick[1], { wasAttempt: true });
+        } else {
+          push('chaos-5-attacker', r, 'neutral', 'BLOCKED', 'non-fast-forward, rejected', { wasAttempt: true });
+        }
+      }
+    }
+
+    t += 6;
+    events.push({
+      t: t, combatantId: 'operator', round: ROUNDS, kind: 'scan', tag: 'SCAN',
+      text: pushedCount + ' blobs decrypted across every generation, 0 findings',
+      finalCheck: { blobsChecked: pushedCount, missingCommits: 0, decryptFailures: 0 }
+    });
+
+    t += 3;
+    events.push({
+      t: t, combatantId: 'operator', round: ROUNDS, kind: 'done', done: true, tag: 'STAND DOWN', text: ROUNDS + ' rounds',
+      audit: { plaintext: 'secure', integrity: 'secure', dataLoss: 'secure' }
+    });
+    ['collaborator-a', 'collaborator-b', 'chaos-4-virus', 'chaos-5-attacker', 'chaos-6-infra'].forEach(function (id) {
+      t += 0.6;
+      events.push({ t: t, combatantId: id, round: ROUNDS, kind: 'done', done: true, tag: 'STAND DOWN', text: ROUNDS + ' rounds' });
+    });
+
+    return events;
+  }
+
+  // ---------- file loading ----------
+
+  document.getElementById('fileInput').addEventListener('change', function (e) {
+    var file = e.target.files[0];
+    if (!file) return;
+    var reader = new FileReader();
+    reader.onload = function () {
+      var text = String(reader.result);
+      var trimmed = text.trim();
+      if (trimmed[0] === '{' && trimmed.indexOf('\n{') === -1) {
+        // single JSON object — treat as a verifier-result.json snapshot
+        try {
+          var result = JSON.parse(trimmed);
+          if (result.invariants) { showSnapshot(result); return; }
+        } catch (e2) { /* fall through to jsonl attempt */ }
+      }
+      var events = parseJsonl(text);
+      if (events.length === 0) {
+        alert('Could not find any recognizable events in that file. Expected chaos/report.jsonl (one JSON object per line) or verifier-result.json.');
+        return;
+      }
+      loadEvents(events, { label: file.name, live: true, replayOnly: true, autoplay: true });
+    };
+    reader.readAsText(file);
+  });
+
+  document.getElementById('demoBtn').addEventListener('click', function () {
+    loadEvents(generateDemo(), { label: 'demo match', autoplay: true });
+  });
+
+  // ---------- boot ----------
+
+  loadEvents(generateDemo(), { label: 'demo match — simulated data', autoplay: true });
+})();
+</script>
+</body>
+</html>
