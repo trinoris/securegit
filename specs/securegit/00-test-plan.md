@@ -395,7 +395,7 @@ and `inspect` all now accept it, each writing the same report object the
 human-readable form already builds — `JSON.stringify`'d, to stdout, nothing
 to stderr — rather than a separately-defined JSON shape to keep in sync.
 `key list`/`list-recipients`, the other two commands the spec names for
-`--json`, don't exist yet.
+`--json`, didn't exist yet at the time — both are built now, see below.
 
 `status` reporting M1–M12 ([14](14-metadata-leakage.md)) is the last item:
 `metadataReport()` in `verify.ts`, a static catalogue crossed with local
@@ -758,14 +758,21 @@ turned out to already be exactly what `removeProvider()`'s "would leave a
 generation with no provider at all" check proves, in a world with zero
 custodial providers built.
 
+`key list-recipients` is implemented too now, as a following cycle: built
+on `accessReport()` ([13](13-verify.md)) — the same report `verify
+--access` already renders — rather than a second enumeration of
+`.securegit/recipients/*.json`, since that report already computes
+fingerprint/label/added-at/added-by/generations (and a `git log`-derived
+`addedCommit`) per recipient. `--json` writes the report's `recipients`
+array directly, unwrapped, unlike `key list`'s `{current, generations}`
+shape — there's only the one thing this command reports.
+
 Only three items remain deferred, each for the same stated reason as
 before: refusing removal of the last recipient, `padTo`/`bindPath`
 change-refusal (no primitive exists to change either post-`init`), and
 F13's concurrent-rotation race (needs a real multi-process harness).
-`key list-recipients` remains unbuilt too — a separate command from the
-`key list` built here, out of scope for this cycle.
 
-696 unit tests, all green; 40 integration tests, all green. The package is
+700 unit tests, all green; 40 integration tests, all green. The package is
 TypeScript (`src/` → `dist/`, NodeNext, `strict` plus
 `noUncheckedIndexedAccess` and `exactOptionalPropertyTypes`), matching
 `@trinoris/decision-core`. Unit
@@ -777,7 +784,7 @@ tests sit beside the source as `*.test.ts`; integration tests are
 | Cryptography | derivations, envelope, padding, known-answer vectors | — |
 | Git integration | filters, attributes, filter-process, real-`git` round trip | — |
 | Keys | keyring, passphrase provider, session, identity keypair/encoding, recipient wrap/unwrap, rotation, recovery export/import | — |
-| Tooling | CLI (`init`/`init --pad-to`/`install`/`protect`/`unprotect`/`unlock`/`lock`/`status`/`status --json`/`identity`/`key add-recipient`/`key remove-recipient`/`key rotate`/`reencrypt`/`key export-recovery`/`key import-recovery`/`key add-provider`/`key remove-provider`/`key list`/`key list --json`/`verify`/`verify --access`/`verify --history`/`verify --json`/`clean`/`smudge`/`textconv`/`merge`/`encrypt`/`decrypt`/`inspect`/`inspect --json`/`filter-process`) | `key list-recipients` |
+| Tooling | CLI (`init`/`init --pad-to`/`install`/`protect`/`unprotect`/`unlock`/`lock`/`status`/`status --json`/`identity`/`key add-recipient`/`key remove-recipient`/`key rotate`/`reencrypt`/`key export-recovery`/`key import-recovery`/`key add-provider`/`key remove-provider`/`key list`/`key list --json`/`key list-recipients`/`key list-recipients --json`/`verify`/`verify --access`/`verify --history`/`verify --json`/`clean`/`smudge`/`textconv`/`merge`/`encrypt`/`decrypt`/`inspect`/`inspect --json`/`filter-process`) | — |
 
 The three things that had to be got right before anything else, because they
 cannot be changed later without breaking every repository already in use, are

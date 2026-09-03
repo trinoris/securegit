@@ -13,10 +13,12 @@ built and tested, including two end-to-end proofs that a second identity can
 join and decrypt with zero shared secrets ever leaving the repository — one
 CLI-level (two identities against one shared working directory) and one
 against a real clone/push/pull in `src/git.integration.test.ts`, which also
-surfaced a genuine ordering constraint (F21 below). Not built yet: `key
-rotate`/`reencrypt` (so `remove-recipient`'s warning is accurate but nothing
-enforces it yet), and `key list-recipients`/`verify --access`. See "What
-this pass actually built" below.
+surfaced a genuine ordering constraint (F21 below). `key rotate`/`reencrypt`
+([09](09-rotation-recovery.md)), `verify --access` and `key list-recipients`
+([10](10-cli-contract.md), [13](13-verify.md)) are all built now too — a
+removed recipient's warning is enforced, not just accurate, and both
+`verify --access` and `key list-recipients` report exactly who can read
+what. See "What this pass actually built" below.
 
 ## Core Principle
 

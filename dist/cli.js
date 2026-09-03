@@ -996,6 +996,37 @@ async function cmdKeyList(args, io) {
     io.stderr(lines.join('\n'));
     return EXIT_OK;
 }
+/**
+ * `key list-recipients` (10-cli-contract.md): fingerprint, label, added-at,
+ * added-by, generations covered — for every `.securegit/recipients/*.json`
+ * file. No key required, same as `key list`. Deliberately built on
+ * `accessReport()` (13-verify.md) rather than its own enumeration: that
+ * report already computes exactly this per recipient, including the
+ * `git log`-derived `addedCommit` `verify --access` shows; re-deriving it
+ * here would just be a second, easier-to-drift copy of the same walk.
+ */
+async function cmdKeyListRecipients(args, io) {
+    try {
+        await readConfig(io.cwd);
+    }
+    catch (e) {
+        io.stderr(e.message);
+        return EXIT_MISCONFIGURED;
+    }
+    const report = await accessReport({ repoDir: io.cwd, home: io.home, env: io.env });
+    if (args.includes('--json')) {
+        writeJson(io, report.recipients);
+        return EXIT_OK;
+    }
+    if (report.recipients.length === 0) {
+        io.stderr('  (none)');
+        return EXIT_OK;
+    }
+    const lines = report.recipients.map((r) => `  ${r.fingerprint}  ${r.label}  added ${r.addedAt.slice(0, 10)} by ${r.addedBy || '(unknown)'}  ` +
+        `gen ${r.generations.join(',')}`);
+    io.stderr(lines.join('\n'));
+    return EXIT_OK;
+}
 async function cmdKey(args, io) {
     const [sub, ...rest] = args;
     switch (sub) {
@@ -1015,10 +1046,12 @@ async function cmdKey(args, io) {
             return await cmdKeyRemoveProvider(rest, io);
         case 'list':
             return await cmdKeyList(rest, io);
+        case 'list-recipients':
+            return await cmdKeyListRecipients(rest, io);
         default:
             io.stderr(sub
                 ? `securegit: unknown key subcommand '${sub}'`
-                : 'usage: securegit key <add-recipient|remove-recipient|rotate|export-recovery|import-recovery|add-provider|remove-provider|list>');
+                : 'usage: securegit key <add-recipient|remove-recipient|rotate|export-recovery|import-recovery|add-provider|remove-provider|list|list-recipients>');
             return EXIT_USAGE;
     }
 }

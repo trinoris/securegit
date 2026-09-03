@@ -338,7 +338,7 @@ a 3-byte file, a committed blob well over 256 bytes, and an exact
 `JSON.stringify`s the same report object the human-readable rendering reads
 from, to stdout, nothing to stderr — no separate schema to define or keep
 in sync. `key list`/`list-recipients`, the other two commands spec 10 names
-for `--json`, don't exist yet, so there's nothing for it to do there.
+for `--json`, didn't exist yet at the time — both are built now, see below.
 
 `status` reporting M1–M12 ([14](14-metadata-leakage.md)) is built too —
 `metadataReport()` in `verify.ts` is a static catalogue crossed with local
@@ -584,12 +584,17 @@ provider could never be reached — fixed with a shared
 against every provider id actually present. This also closed spec 06's
 "removing the last non-custodial provider" row for free.
 
+`key list-recipients` is implemented too now, built on `accessReport()`
+([13](13-verify.md)) rather than a second enumeration of
+`.securegit/recipients/*.json` — the same report `verify --access` already
+renders. `--json` writes the report's `recipients` array directly,
+unwrapped.
+
 Only three items remain deferred: refusing removal of the last recipient,
 `padTo`/`bindPath` change-refusal (no primitive exists), and F13's
-concurrent-rotation race. `key list-recipients` remains unbuilt too, a
-separate command from `key list`.
+concurrent-rotation race.
 
-696 unit tests total, all green; 40 integration tests, all green. TypeScript,
+700 unit tests total, all green; 40 integration tests, all green. TypeScript,
 `src/` → `dist/`, unit tests beside the source, matching
 `@trinoris/decision-core`.
 
@@ -598,7 +603,7 @@ separate command from `key list`.
 | Cryptography | derivations, envelope, padding, known-answer vectors | — |
 | Git integration | clean/smudge/textconv, attributes, filter-process, real-`git` round trip | — |
 | Keys | keyring, passphrase provider, session, identity keypair/encoding, recipient wrap/unwrap, rotation, recovery export/import | — |
-| Tooling | CLI (`init`/`init --pad-to`/`install`/`protect`/`unprotect`/`unlock`/`lock`/`status`/`status --json`/`identity`/`key add-recipient`/`key remove-recipient`/`key rotate`/`reencrypt`/`key export-recovery`/`key import-recovery`/`key add-provider`/`key remove-provider`/`key list`/`key list --json`/`verify`/`verify --access`/`verify --history`/`verify --json`/`clean`/`smudge`/`textconv`/`merge`/`encrypt`/`decrypt`/`inspect`/`inspect --json`/`filter-process`) | `key list-recipients` |
+| Tooling | CLI (`init`/`init --pad-to`/`install`/`protect`/`unprotect`/`unlock`/`lock`/`status`/`status --json`/`identity`/`key add-recipient`/`key remove-recipient`/`key rotate`/`reencrypt`/`key export-recovery`/`key import-recovery`/`key add-provider`/`key remove-provider`/`key list`/`key list --json`/`key list-recipients`/`key list-recipients --json`/`verify`/`verify --access`/`verify --history`/`verify --json`/`clean`/`smudge`/`textconv`/`merge`/`encrypt`/`decrypt`/`inspect`/`inspect --json`/`filter-process`) | — |
 
 Ten things worth knowing before reading any spec here. The first three are the
 load-bearing ones; the last two are about scope.

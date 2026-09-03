@@ -1054,7 +1054,7 @@ describe('clean / smudge', () => {
   });
 });
 
-describe('key add-provider / key remove-provider / key list', () => {
+describe('key add-provider / key remove-provider / key list / key list-recipients', () => {
   const BACKUP_PASSPHRASE = 'a second, independent secret!!';
 
   it('add-provider wraps every generation for a second, independent passphrase, unlockable on its own', async () => {
@@ -1153,6 +1153,52 @@ describe('key add-provider / key remove-provider / key list', () => {
     expect(parsed.current).toBe(1);
     expect(parsed.generations).toHaveLength(1);
     expect(parsed.generations[0].providers).toEqual(['passphrase-file']);
+  });
+
+  it('list-recipients exits misconfigured before init', async () => {
+    const h = harness();
+    expect(await h.run(['key', 'list-recipients'])).toBe(2);
+  });
+
+  it('list-recipients reports "(none)" for a fresh repository', async () => {
+    const h = harness();
+    await h.run(['init']);
+    expect(await h.run(['key', 'list-recipients'], { env: {} })).toBe(0);
+    expect(h.stderrText()).toContain('(none)');
+  });
+
+  it('list-recipients reports fingerprint, label, added-at and generations, without needing a key', async () => {
+    const h = harness();
+    await h.run(['init']);
+    await h.run(['unlock']);
+    const otherHome = await mkdtemp(join(tmpdir(), 'securegit-cli-list-recipients-'));
+    const other = harness({ home: otherHome });
+    await other.run(['identity', 'init']);
+    const identity = JSON.parse(await readFile(join(otherHome, '.securegit', 'identity.json'), 'utf8'));
+    await h.run(['key', 'add-recipient', identity.publicKey, '--label', 'laptop']);
+
+    expect(await h.run(['key', 'list-recipients'], { env: {} })).toBe(0);
+    const text = h.stderrText();
+    expect(text).toContain(identity.fingerprint);
+    expect(text).toContain('laptop');
+    expect(text).toContain('gen 1');
+  });
+
+  it('list-recipients --json writes the same information as structured data, to stdout', async () => {
+    const h = harness();
+    await h.run(['init']);
+    await h.run(['unlock']);
+    const otherHome = await mkdtemp(join(tmpdir(), 'securegit-cli-list-recipients-'));
+    const other = harness({ home: otherHome });
+    await other.run(['identity', 'init']);
+    const identity = JSON.parse(await readFile(join(otherHome, '.securegit', 'identity.json'), 'utf8'));
+    await h.run(['key', 'add-recipient', identity.publicKey, '--label', 'laptop']);
+
+    expect(await h.run(['key', 'list-recipients', '--json'], { env: {} })).toBe(0);
+    const parsed = JSON.parse(h.stdoutText());
+    expect(parsed).toHaveLength(1);
+    expect(parsed[0].fingerprint).toBe(identity.fingerprint);
+    expect(parsed[0].label).toBe('laptop');
   });
 });
 
