@@ -1624,7 +1624,7 @@ describe('key rotate / reencrypt', () => {
 
     it('refuses without --confirm-recipients, printing the (empty) recipient list', async () => {
       const h = await setUp();
-      expect(await h.run(['key', 'rotate'])).toBe(4);
+      expect(await h.run(['key', 'rotate'], { env: {} })).toBe(4);
       const text = h.stderrText();
       expect(text).toContain('0 recipient');
       expect(text).toContain('--confirm-recipients 0');
@@ -1632,14 +1632,14 @@ describe('key rotate / reencrypt', () => {
 
     it('refuses a --confirm-recipients count that does not match reality', async () => {
       const h = await setUp();
-      expect(await h.run(['key', 'rotate', '--confirm-recipients', '3'])).toBe(4);
+      expect(await h.run(['key', 'rotate', '--confirm-recipients', '3'], { env: {} })).toBe(4);
     });
 
     it('refuses a dirty working tree', async () => {
       const h = await setUp();
       await writeFile(join(realDir, 'untracked.txt'), 'dirty\n');
       await execFile('git', ['add', 'untracked.txt'], { cwd: realDir, env: gitEnv(realHome) });
-      expect(await h.run(['key', 'rotate', '--confirm-recipients', '0'])).toBe(4);
+      expect(await h.run(['key', 'rotate', '--confirm-recipients', '0'], { env: {} })).toBe(4);
     });
 
     it('refuses when locked, before ever asking for recipient confirmation', async () => {
@@ -1650,6 +1650,11 @@ describe('key rotate / reencrypt', () => {
 
     it('adds a generation, keeps the old one, and invalidates the session', async () => {
       const h = await setUp();
+      // `key rotate` itself needs SECUREGIT_PASSPHRASE (or stdin) for its
+      // own resolvePassphrase() call — it wraps the *new* generation with
+      // it, a genuinely separate need from loadKeys()'s authentication
+      // check, which is why this one call keeps the default env while
+      // every other call in this file strips it.
       expect(await h.run(['key', 'rotate', '--confirm-recipients', '0'])).toBe(0);
       expect(await h.run(['status'], { env: {} })).toBe(1); // rotate locks; a fresh unlock is required
 
@@ -1660,7 +1665,7 @@ describe('key rotate / reencrypt', () => {
         encoding: 'buffer',
         env: gitEnv(realHome),
       });
-      expect(await h.run(['smudge', '--', PATH], { stdin: committed.stdout })).toBe(0);
+      expect(await h.run(['smudge', '--', PATH], { stdin: committed.stdout, env: {} })).toBe(0);
       expect(h.stdoutBuf().equals(PT1)).toBe(true);
     });
 
@@ -1674,7 +1679,7 @@ describe('key rotate / reencrypt', () => {
           await readFile(join(recipientHome, '.securegit', 'identity.json'), 'utf8'),
         ) as { publicKey: string; fingerprint: string };
 
-        await h.run(['key', 'add-recipient', identity.publicKey, '--label', 'recipient']);
+        await h.run(['key', 'add-recipient', identity.publicKey, '--label', 'recipient'], { env: {} });
         // `add-recipient` writes the file but deliberately doesn't commit it
         // (its own message says to) — `rotate`'s dirty-tree check would
         // otherwise correctly refuse here, exactly as it should for a real
@@ -1686,9 +1691,11 @@ describe('key rotate / reencrypt', () => {
         });
 
         // Without confirmation, the list names the actual recipient.
-        expect(await h.run(['key', 'rotate'])).toBe(4);
+        expect(await h.run(['key', 'rotate'], { env: {} })).toBe(4);
         expect(h.stderrText()).toContain(identity.fingerprint);
 
+        // `key rotate` itself needs SECUREGIT_PASSPHRASE (or stdin) to wrap
+        // the new generation — default env, unlike the calls around it.
         expect(await h.run(['key', 'rotate', '--confirm-recipients', '1'])).toBe(0);
 
         const recipientFile = JSON.parse(
@@ -1711,22 +1718,22 @@ describe('key rotate / reencrypt', () => {
   describe('reencrypt', () => {
     it('--dry-run stages nothing', async () => {
       const h = await setUp();
-      await h.run(['key', 'rotate', '--confirm-recipients', '0']);
+      expect(await h.run(['key', 'rotate', '--confirm-recipients', '0'])).toBe(0);
       await h.run(['unlock']);
 
       const before = await realGit(['status', '--porcelain']);
-      expect(await h.run(['reencrypt', '--dry-run'])).toBe(0);
+      expect(await h.run(['reencrypt', '--dry-run'], { env: {} })).toBe(0);
       expect(await realGit(['status', '--porcelain'])).toBe(before);
       expect(h.stderrText()).toContain('would change');
     });
 
     it('moves a protected file to the current generation, staged but not committed', async () => {
       const h = await setUp();
-      await h.run(['key', 'rotate', '--confirm-recipients', '0']);
+      expect(await h.run(['key', 'rotate', '--confirm-recipients', '0'])).toBe(0);
       await h.run(['unlock']);
 
       const beforeHead = await realGit(['rev-parse', `HEAD:${PATH}`]);
-      expect(await h.run(['reencrypt'])).toBe(0);
+      expect(await h.run(['reencrypt'], { env: {} })).toBe(0);
 
       // History is untouched...
       expect(await realGit(['rev-parse', `HEAD:${PATH}`])).toBe(beforeHead);
@@ -1739,18 +1746,18 @@ describe('key rotate / reencrypt', () => {
         encoding: 'buffer',
         env: gitEnv(realHome),
       });
-      expect(await h.run(['smudge', '--', PATH], { stdin: staged.stdout })).toBe(0);
+      expect(await h.run(['smudge', '--', PATH], { stdin: staged.stdout, env: {} })).toBe(0);
       expect(h.stdoutBuf().equals(PT1)).toBe(true);
     });
 
     it('is a no-op the second time, once everything is already current', async () => {
       const h = await setUp();
-      await h.run(['key', 'rotate', '--confirm-recipients', '0']);
+      expect(await h.run(['key', 'rotate', '--confirm-recipients', '0'])).toBe(0);
       await h.run(['unlock']);
-      await h.run(['reencrypt']);
+      await h.run(['reencrypt'], { env: {} });
 
       const stagedSha = await realGit(['rev-parse', ':' + PATH]);
-      expect(await h.run(['reencrypt'])).toBe(0);
+      expect(await h.run(['reencrypt'], { env: {} })).toBe(0);
       expect(h.stderrText()).toContain('already current');
       expect(await realGit(['rev-parse', ':' + PATH])).toBe(stagedSha);
     });

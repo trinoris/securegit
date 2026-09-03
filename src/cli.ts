@@ -854,10 +854,18 @@ async function cmdKeyRotate(args: string[], io: CliIO): Promise<number> {
     // under load, not just wasteful locally.
     const { SECUREGIT_SESSION_KEY: _sk, SECUREGIT_PASSPHRASE: _pp, SECUREGIT_IDENTITY_FILE: _idf, ...rest } =
       io.env;
-    const { stdout } = await execFile('git', ['status', '--porcelain'], {
-      cwd: io.cwd,
-      env: { ...rest, HOME: io.home },
-    });
+    // `rest` (an injected CliIO's env in tests) is not guaranteed to carry
+    // `PATH` at all — it exists to inject specific variables for a test,
+    // not to simulate a full realistic environment. Without it, git can
+    // still be found (the OS falls back to a default search path that
+    // usually includes it), but the *filter* git then spawns as part of
+    // this very check often can't be: a version-managed or CI-installed
+    // `node` typically lives somewhere that default fallback path doesn't
+    // reach. Falls back to this process's own PATH, exactly like the real
+    // binary already gets for free since its `io.env` *is* `process.env`.
+    const env: NodeJS.ProcessEnv = { ...rest, HOME: io.home };
+    if (env.PATH === undefined) env.PATH = process.env.PATH;
+    const { stdout } = await execFile('git', ['status', '--porcelain'], { cwd: io.cwd, env });
     statusOutput = stdout;
   } catch (e) {
     io.stderr(`securegit: could not check git status: ${(e as Error).message}`);
