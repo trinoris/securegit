@@ -434,7 +434,48 @@ today, `passphrase-file`; a second real provider is a new row, not a new
 test file. `src/provider.test.ts` stays specific to `passphrase-file`
 itself.
 
-615 unit tests total, all green; 26 integration tests, all green. TypeScript,
+`-v`/`--verbose` ([10](10-cli-contract.md)) is next — real per-file tracing
+for `clean`, `smudge` and `merge`. `FilterContext`/`MergeOptions` each
+gained an optional `trace?: (message: string) => void`, called at most
+once per invocation with the path, the generation, and which branch was
+taken, never plaintext or key material. Parsed like `--strict` — a flag
+collected from before the `--` separator by each command's own arg parser
+— rather than stripped globally from `argv` like `--repo`, since a path
+after `--` may legally begin with `-`.
+
+`--quiet` ([10](10-cli-contract.md)) closes out the CLI-wide flags —
+splitting `CliIO`'s single `stderr` callback into `stderr` (errors, plus
+every report-type command's actual report — status/`identity show`/
+`verify`/`inspect`, `reencrypt`'s per-file summary, and `key
+export-recovery`'s one-time recovery code, none of them suppressible) and a
+new `info` (one-shot success confirmations only, suppressed under
+`--quiet`). The split matters because spec 10 already routes a report
+command's human-readable output to stderr since Git never treats it as
+data — a naive "suppress all non-error stderr" would silence that report
+entirely, when it's the actual point of running the command, not a
+diagnostic aside. `runCli` checks `argv.includes('--quiet')` once and swaps
+`io.info` for a no-op; unlike `--repo` it isn't stripped from `argv`, since
+it takes no value and nothing parses `args` positionally.
+
+A first batch of "prove existing behavior against real git" rows (specs
+[01](01-threat-model.md), [02](02-git-integration.md),
+[07](07-unlock-session.md), [12](12-diff-merge.md),
+[15](15-failure-modes.md)) is closed out — no product code changed, five
+new tests in `src/git.integration.test.ts` plus one spec correction (spec
+07's "`git add` fails when locked" was already proven by the existing F16
+test). A forced `repack` on a real pushed bare remote and a real `git
+bundle` are each scanned raw for plaintext bytes, and the bundle is also
+cloned into a fresh keyless home to prove it checks out as ciphertext.
+`git log -p` is proven to show plaintext via `textconv`, never the
+envelope's magic marker, and `git count-objects` stays unchanged across it.
+One combined F1 test (a locked `git add` rejects, the index is unchanged,
+`count-objects` is unchanged) turns out to prove three separate spec rows
+at once, since `clean`'s only failure mode is `LockedError`. Remaining rows
+in the same batch — `core.autocrlf`/inherited-attribute round-trips,
+removed-recipient pre/post-rotation reads, `reencrypt` across a real clone,
+and a few small unit-file gaps — are left for further cycles.
+
+637 unit tests total, all green; 31 integration tests, all green. TypeScript,
 `src/` → `dist/`, unit tests beside the source, matching
 `@trinoris/decision-core`.
 

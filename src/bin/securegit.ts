@@ -66,6 +66,9 @@ async function main(): Promise<void> {
     stderr: (message) => {
       process.stderr.write(`${message}\n`);
     },
+    info: (message) => {
+      process.stderr.write(`${message}\n`);
+    },
   });
   process.exitCode = code;
 }

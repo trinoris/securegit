@@ -56,6 +56,8 @@ export interface FilterContext {
   strict?: boolean;
   /** Defaults to `console.error`. Never receives plaintext or key material. */
   warn?: (message: string) => void;
+  /** `-v`/`--verbose`: one line per invocation, path and generation only. Never receives plaintext or key material. Silent (not even the default `warn` sink) unless set. */
+  trace?: (message: string) => void;
 }
 
 function defaultWarn(message: string): void {
@@ -97,6 +99,7 @@ export function clean(input: Buffer, ctx: FilterContext): Buffer {
       if (rmk !== null) {
         try {
           unsealFor(input, rmk, ctx);
+          ctx.trace?.(`clean   ${ctx.path}  passthrough (already generation ${header.keyId})`);
           return input;
         } catch {
           // Falls through to re-encryption below.
@@ -105,7 +108,7 @@ export function clean(input: Buffer, ctx: FilterContext): Buffer {
     }
   }
 
-  return seal(input, {
+  const out = seal(input, {
     rmk: current.rmk,
     keyId: current.keyId,
     path: ctx.path,
@@ -113,6 +116,8 @@ export function clean(input: Buffer, ctx: FilterContext): Buffer {
     ...(ctx.maxBytes !== undefined ? { maxBytes: ctx.maxBytes } : {}),
     ...(ctx.padTo !== undefined ? { padTo: ctx.padTo } : {}),
   });
+  ctx.trace?.(`clean   ${ctx.path}  generation ${current.keyId}`);
+  return out;
 }
 
 /** `unseal` with `maxBytes` included only when the caller set one. */
@@ -143,6 +148,7 @@ function missingKeyMessage(path: string, wanted: string, held: string[]): string
 export function smudge(input: Buffer, ctx: FilterContext): Buffer {
   if (!looksLikeEnvelope(input)) {
     // Predates securegit, or was committed with the filter uninstalled.
+    ctx.trace?.(`smudge  ${ctx.path}  passthrough (not encrypted)`);
     return input;
   }
 
@@ -161,11 +167,14 @@ export function smudge(input: Buffer, ctx: FilterContext): Buffer {
         : new EnvelopeError(message);
     }
     warn(message);
+    ctx.trace?.(`smudge  ${ctx.path}  passthrough (missing generation ${header.keyId})`);
     return input;
   }
 
   try {
-    return unsealFor(input, rmk, ctx);
+    const out = unsealFor(input, rmk, ctx);
+    ctx.trace?.(`smudge  ${ctx.path}  generation ${header.keyId}`);
+    return out;
   } catch (e) {
     // Authentication failure: never pass this through, strict or not.
     const err = e as Error;

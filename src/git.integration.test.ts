@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { execFile as execFileCb, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdtemp, rm, mkdir, writeFile, readFile, utimes } from 'node:fs/promises';
+import { mkdtemp, rm, mkdir, writeFile, readFile, utimes, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MAGIC } from './envelope.js';
@@ -139,6 +139,19 @@ describe('a real Git repository with a real securegit filter', () => {
     await git(dir, home, ['checkout', '--', PROTECTED_PATH]); // restore
   });
 
+  it('git log -p shows plaintext across commits, via textconv, never the envelope', async () => {
+    const log = await git(dir, home, ['log', '-p', '--', PROTECTED_PATH]);
+    expect(log).toContain('hunter2');
+    expect(log).not.toContain('SECUREGIT'); // the envelope's magic marker — never shown
+  });
+
+  it('textconv never writes to the object database', async () => {
+    const before = await git(dir, home, ['count-objects']);
+    await git(dir, home, ['log', '-p', '--', PROTECTED_PATH]); // invokes textconv once per commit touching the path
+    const after = await git(dir, home, ['count-objects']);
+    expect(after).toBe(before);
+  });
+
   it('git stash / stash pop leaves a clean tree and correct plaintext', async () => {
     await writeFile(join(dir, PROTECTED_PATH), Buffer.from('{"password":"temporary-edit"}\n'));
     await git(dir, home, ['stash']);
@@ -184,6 +197,32 @@ describe('a real Git repository with a real securegit filter', () => {
     } finally {
       await securegit(dir, home, ['unlock']); // leave state clean for the tests below
       await git(dir, home, ['checkout', '--', PROTECTED_PATH]); // discard the failed add attempt's fallout, if any
+    }
+    expect(await git(dir, home, ['status', '--porcelain'])).toBe('');
+  });
+
+  it('F1: a filter failure aborts `git add`, leaves the index unchanged, and writes nothing to the object database', async () => {
+    // `clean`'s only failure mode is `LockedError` ([07](07-unlock-session.md))
+    // — there is no other way for the filter to exit non-zero — so proving
+    // this for the locked case proves it for every failure path there is.
+    const beforeIndexSha = await git(dir, home, ['rev-parse', `:${PROTECTED_PATH}`]);
+    const objectsBefore = await git(dir, home, ['count-objects']);
+
+    await writeFile(join(dir, PROTECTED_PATH), Buffer.from('{"password":"never-should-be-committed"}\n'));
+    const future = new Date(Date.now() + 120_000);
+    await utimes(join(dir, PROTECTED_PATH), future, future); // force git to re-invoke the filter, not skip via its stat cache
+
+    await securegit(dir, home, ['lock']);
+    try {
+      await expect(git(dir, home, ['add', PROTECTED_PATH])).rejects.toThrow(/locked/);
+      // the index still points at the old (ciphertext) blob — nothing staged
+      expect(await git(dir, home, ['rev-parse', `:${PROTECTED_PATH}`])).toBe(beforeIndexSha);
+      // and no object of any kind was written trying — the filter throws
+      // before `add` ever reaches its own hash-object step
+      expect(await git(dir, home, ['count-objects'])).toBe(objectsBefore);
+    } finally {
+      await securegit(dir, home, ['unlock']);
+      await git(dir, home, ['checkout', '--', PROTECTED_PATH]); // discard the failed attempt's worktree edit
     }
     expect(await git(dir, home, ['status', '--porcelain'])).toBe('');
   });
@@ -323,6 +362,43 @@ describe('a real Git repository with a real securegit filter', () => {
       const content = await readFile(join(cloneDir, PROTECTED_PATH));
       expect(content.equals(PLAINTEXT)).toBe(true);
       expect(await git(cloneDir, home, ['status', '--porcelain'])).toBe('');
+    });
+
+    it('the pushed pack on the bare remote contains no plaintext byte from the protected file', async () => {
+      // A repo this small may not pack on push at all (git can decide loose
+      // objects suffice) — force a real pack so this actually exercises the
+      // packed representation, not just loose objects (already covered by
+      // "`.git/objects` contains no plaintext after `add`+`commit`",
+      // 01-threat-model.md).
+      await git(bareDir, home, ['repack', '-a', '-d', '-q']);
+      const packDir = join(bareDir, 'objects', 'pack');
+      const packFiles = (await readdir(packDir)).filter((f) => f.endsWith('.pack'));
+      expect(packFiles.length).toBeGreaterThan(0);
+      for (const f of packFiles) {
+        const raw = await readFile(join(packDir, f));
+        expect(raw.includes(Buffer.from('hunter2'))).toBe(false);
+      }
+    });
+
+    it('a bundle of the repository decrypts to nothing without the key', async () => {
+      const bundleTmpDir = await mkdtemp(join(tmpdir(), 'securegit-git-bundle-'));
+      const bundlePath = join(bundleTmpDir, 'repo.bundle');
+      const bundleCloneDir = await mkdtemp(join(tmpdir(), 'securegit-git-bundle-clone-'));
+      await rm(bundleCloneDir, { recursive: true, force: true });
+      try {
+        await git(dir, home, ['bundle', 'create', bundlePath, '--all']);
+        // The bundle file itself, raw, carries no plaintext byte either.
+        expect((await readFile(bundlePath)).includes(Buffer.from('hunter2'))).toBe(false);
+
+        // And checking it out, without ever running `unlock`, yields ciphertext.
+        await git(dir, home, ['clone', '--quiet', '--branch', 'main', bundlePath, bundleCloneDir]);
+        const content = await readFile(join(bundleCloneDir, PROTECTED_PATH));
+        expect(content.subarray(0, MAGIC.length).equals(MAGIC)).toBe(true);
+        expect(content.includes(Buffer.from('hunter2'))).toBe(false);
+      } finally {
+        await rm(bundleTmpDir, { recursive: true, force: true });
+        await rm(bundleCloneDir, { recursive: true, force: true });
+      }
     });
   });
 

@@ -161,6 +161,35 @@ describe('clean()', () => {
     clean(PT, ctx({ warn }));
     expect(warn).not.toHaveBeenCalled();
   });
+
+  describe('trace', () => {
+    it('calls trace once with the path and generation when encrypting', () => {
+      const trace = vi.fn();
+      clean(PT, ctx({ trace }));
+      expect(trace).toHaveBeenCalledTimes(1);
+      const line = String(trace.mock.calls[0]![0]);
+      expect(line).toContain(PATH);
+      expect(line).toContain(KEY_ID_3);
+    });
+
+    it('calls trace once on the already-encrypted passthrough branch too', () => {
+      const trace = vi.fn();
+      clean(envelope2, ctx({ trace }));
+      expect(trace).toHaveBeenCalledTimes(1);
+    });
+
+    it('never mentions plaintext or key material', () => {
+      const trace = vi.fn();
+      clean(PT, ctx({ trace }));
+      const line = String(trace.mock.calls[0]![0]);
+      expect(line).not.toContain(PT.toString('utf8'));
+      expect(line).not.toContain(RMK3.toString('hex'));
+    });
+
+    it('does nothing, and does not throw, when no trace callback is given', () => {
+      expect(() => clean(PT, ctx())).not.toThrow();
+    });
+  });
 });
 
 describe('smudge()', () => {
@@ -240,6 +269,42 @@ describe('smudge()', () => {
 
     it('still passes plaintext through', () => {
       expect(smudge(PT, ctx({ strict: true })).equals(PT)).toBe(true);
+    });
+  });
+
+  describe('trace', () => {
+    it('calls trace once with the path and generation on a successful decrypt', () => {
+      const trace = vi.fn();
+      smudge(envelope3, ctx({ trace }));
+      expect(trace).toHaveBeenCalledTimes(1);
+      const line = String(trace.mock.calls[0]![0]);
+      expect(line).toContain(PATH);
+      expect(line).toContain(KEY_ID_3);
+    });
+
+    it('calls trace once on a plaintext passthrough', () => {
+      const trace = vi.fn();
+      smudge(PT, ctx({ trace }));
+      expect(trace).toHaveBeenCalledTimes(1);
+    });
+
+    it('calls trace once on a missing-generation passthrough, alongside warn', () => {
+      const trace = vi.fn();
+      const warn = vi.fn();
+      smudge(envelope3, ctx({ keys: partial(), trace, warn }));
+      expect(trace).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenCalledTimes(1);
+    });
+
+    it('never mentions plaintext', () => {
+      const trace = vi.fn();
+      smudge(envelope3, ctx({ trace }));
+      const line = String(trace.mock.calls[0]![0]);
+      expect(line).not.toContain(PT.toString('utf8'));
+    });
+
+    it('does nothing, and does not throw, when no trace callback is given', () => {
+      expect(() => smudge(envelope3, ctx())).not.toThrow();
     });
   });
 });

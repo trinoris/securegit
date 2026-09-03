@@ -188,7 +188,7 @@ Messages go to stderr in every case ([10](10-cli-contract.md)), including
 |------|-----------|---------|--------|
 | Each F-code this package controls the message for follows discipline (F1/F9, F5, F6, F18) | `src/failure.test.ts` | — | ✅ |
 | Each message named above starts `securegit:`, names the path, and ends in an `action:` line | `src/failure.test.ts` | — | ✅ |
-| F1: `git add` aborts and the index is unchanged | `src/git.integration.test.ts` | `repo-protected/` | 🔲 |
+| F1: `git add` aborts and the index is unchanged | `src/git.integration.test.ts` | `repo-protected/` | ✅ |
 | F2: clone succeeds with no key | `src/git.integration.test.ts` | `repo-protected/` | ✅ |
 | F4: the documented `install`+`unlock`+recovery sequence works | `src/git.integration.test.ts` | `repo-protected/` | ✅ |
 | F5: message names both generations and fingerprints | `src/failure.test.ts` | — | ✅ |
@@ -202,7 +202,7 @@ Messages go to stderr in every case ([10](10-cli-contract.md)), including
 | F21: a locked repository with the filter attached cannot `git pull` | `src/git.integration.test.ts` | — | ✅ |
 | `status` warns while there is only one recovery path | `src/cli.test.ts` | — | ✅ |
 | `verify` reports a single recovery path, no export, as a finding | `src/verify.test.ts` | — | ✅ |
-| No failure path writes plaintext to the object database | `src/git.integration.test.ts` | `repo-protected/` | 🔲 |
+| No failure path writes plaintext to the object database | `src/git.integration.test.ts` | `repo-protected/` | ✅ (`clean`'s only failure mode is `LockedError` — F1's test proves `git count-objects` is unchanged by the failed `add`, which covers every failure path there is) |
 
 ## Relationship to Other Specs
 

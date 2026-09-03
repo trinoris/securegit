@@ -499,7 +499,72 @@ through nested objects but treating a `Buffer` as opaque key material
 rather than a container to inspect. `src/provider.test.ts` is unchanged —
 it keeps everything specific to `passphrase-file` itself.
 
-615 unit tests, all green; 26 integration tests, all green. The package is
+`-v`/`--verbose` ([10](10-cli-contract.md)) is next: real per-file tracing
+for `clean`, `smudge` and `merge`, not a no-op. `FilterContext` and
+`MergeOptions` each gained an optional `trace?: (message: string) => void`
+called at most once per invocation — the path, the generation, and which
+branch was taken (encrypted, decrypted, or a passthrough), never plaintext
+or key material, same redaction discipline as the existing `warn`
+callback. Parsed like `--strict` (a flag collected from before the `--`
+separator by each command's own arg parser) rather than stripped globally
+from `argv` the way `--repo` is — a path after `--` is legally allowed to
+begin with `-`, and a global scan for `-v` would risk matching one.
+`cli.ts` wires `trace: io.stderr` only when the flag is present; the
+filter functions themselves never know "verbose" as a concept, only
+whether a callback exists, so every existing non-verbose call site is
+unchanged.
+
+`--quiet` ([10](10-cli-contract.md)) closes out the CLI-wide flags. It
+required splitting `CliIO`'s single `stderr` callback into two: `stderr`
+stays error-only plus every report-type command's actual report, `info` is
+new and carries just the one-shot success confirmations (`init`, `unlock`,
+`protect`/`unprotect`, `identity init`, the `key` subcommands that
+succeed, `lock`) — suppressed under `--quiet`, unlike `stderr`. The reason
+for the split rather than a blanket "suppress everything non-error": spec
+10's own stdout/stderr rule already puts `status`, `identity show`,
+`verify`, and `inspect`'s human-readable reports on stderr, since Git never
+treats them as data — but a report command's report is not a diagnostic
+aside, it is the entire reason to run the command, the same content
+`--json` puts on stdout instead for a script. Suppressing it under
+`--quiet` would leave a report command silently printing nothing on
+success. So those reports (and `reencrypt`'s per-file summary, and `key
+export-recovery`'s one-time recovery code — the only place that code is
+ever displayed) stay on `stderr`, exempt from `--quiet`, the same way they
+were already exempt from being stdout output. `runCli` checks
+`argv.includes('--quiet')` once before dispatch and swaps `io.info` for a
+no-op; unlike `--repo`, the flag is not stripped from `argv` — it takes no
+value, and no command parses `args` positionally in a way an unconsumed
+`--quiet` token could disrupt.
+
+A first batch of "prove existing behavior against real git" rows (specs
+[01](01-threat-model.md), [02](02-git-integration.md),
+[07](07-unlock-session.md), [12](12-diff-merge.md),
+[15](15-failure-modes.md)) is closed out — no product code changed, only
+`src/git.integration.test.ts` gaining five new tests plus one spec
+correction. Two extend the existing `'a clone of the repository'` describe
+block, reusing its bare remote: a forced `repack -a -d` on the bare repo
+scans every resulting `.pack` file's raw bytes for the plaintext, and a
+`git bundle create --all` is scanned the same way, then cloned into a
+fresh, keyless home to prove it checks out as ciphertext, not just that its
+raw bytes look clean. Two more reuse the shared top-level fixture read-only
+(`git log -p` shows plaintext via `textconv`, never the envelope's magic
+marker; `git count-objects` is unchanged across a `log -p` that invokes
+`textconv` once per commit). The fifth is one combined test for F1 — a
+locked `git add` rejects, leaves the index pointing at the old blob, and
+leaves `git count-objects` unchanged — which turns out to prove three
+separate spec rows at once (02's "filter exiting non-zero aborts `git
+add`", 15's F1, and 15's "no failure path writes plaintext to the object
+database"), since `clean`'s only failure mode is `LockedError`: there is no
+other failure path to separately exercise. Spec 07's "`git add` of a
+protected file fails when locked" turned out to already be proven by the
+existing F16 test (touching then re-adding a locked, unmodified file
+touches this exact assertion along the way) — corrected to ✅ rather than
+duplicating it. `core.autocrlf=true`/inherited-`* text` round-trips, the
+removed-recipient pre/post-rotation pair, `reencrypt` across a real clone,
+and the remaining small unit-file gaps are still open, left for further
+cycles of the same batch.
+
+637 unit tests, all green; 31 integration tests, all green. The package is
 TypeScript (`src/` → `dist/`, NodeNext, `strict` plus
 `noUncheckedIndexedAccess` and `exactOptionalPropertyTypes`), matching
 `@trinoris/decision-core`. Unit

@@ -233,7 +233,7 @@ shown above are not built — `status` stays a cheap, session-only read
 | Test | Test File | Fixture | Status |
 |------|-----------|---------|--------|
 | `clean` without a key exits non-zero and writes nothing to stdout | `src/filter.test.ts` | — | ✅ |
-| `git add` of a protected file fails when locked | `src/git.integration.test.ts` | `repo-protected/` | 🔲 |
+| `git add` of a protected file fails when locked | `src/git.integration.test.ts` | `repo-protected/` | ✅ (F16's own test — touching then re-adding a locked, unmodified file — already exercises this exact assertion; also reconfirmed by 15-failure-modes.md's F1 test) |
 | `smudge` without a key emits input unchanged and exits 0 | `src/filter.test.ts` | — | ✅ |
 | `git clone` succeeds with no key present | `src/git.integration.test.ts` | `repo-protected/` | ✅ |
 | `unlock` then `rm --cached`+`checkout HEAD` repairs a keyless clone | `src/git.integration.test.ts` | `repo-protected/` | ✅ |

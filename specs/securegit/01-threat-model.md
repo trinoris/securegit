@@ -14,7 +14,9 @@ Every later spec is a consequence of one of the lines below.
 `src/filter.ts` (the boundary itself), `src/session.ts` and `src/keyring.ts`
 (the key material that must never cross it), proven end to end in
 `src/git.integration.test.ts` — no plaintext byte reaches `.git/objects`,
-push, clone or a mirror.
+push, clone or a mirror: a real `git push` followed by a forced `repack` on
+the bare remote is scanned byte-for-byte, and a `git bundle` both scans
+clean and checks out as ciphertext when cloned by a fresh, keyless home.
 
 ## Core Principle
 
@@ -136,9 +138,9 @@ belong in this repository at all.
 
 | Test | Test File | Fixture | Status |
 |------|-----------|---------|--------|
-| Pushed pack contains no plaintext byte from any protected file | `src/git.integration.test.ts` | `repo-protected/` | 🔲 |
+| Pushed pack contains no plaintext byte from any protected file | `src/git.integration.test.ts` | `repo-protected/` | ✅ |
 | `.git/objects` contains no plaintext after `add`+`commit` | `src/git.integration.test.ts` | `repo-protected/` | ✅ |
-| A bundle of the repo decrypts to nothing without the key | `src/git.integration.test.ts` | `repo-protected/` | 🔲 |
+| A bundle of the repo decrypts to nothing without the key | `src/git.integration.test.ts` | `repo-protected/` | ✅ |
 | Clone by a keyless third party yields ciphertext in the worktree | `src/git.integration.test.ts` | `repo-protected/` | ✅ |
 | Removing the `.gitattributes` line is reported by `verify` | `src/verify.test.ts` | `attributes/` | ✅ |
 | Session cache and keyring are never written inside the repo | `src/config.test.ts` | — | 🔲 |

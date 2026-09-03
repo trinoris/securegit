@@ -28,6 +28,7 @@ afterEach(async () => {
 function harness(overrides: Partial<CliIO> = {}) {
   const outChunks: Buffer[] = [];
   const errLines: string[] = [];
+  const infoLines: string[] = [];
   const io: CliIO = {
     argv: [],
     cwd: dir,
@@ -36,6 +37,7 @@ function harness(overrides: Partial<CliIO> = {}) {
     home,
     stdout: (chunk) => outChunks.push(chunk),
     stderr: (message) => errLines.push(message),
+    info: (message) => infoLines.push(message),
     now: () => new Date(),
     ...overrides,
   };
@@ -48,11 +50,13 @@ function harness(overrides: Partial<CliIO> = {}) {
     run: (argv: string[], io2: Partial<CliIO> = {}) => {
       outChunks.length = 0;
       errLines.length = 0;
+      infoLines.length = 0;
       return runCli({ ...io, argv, ...io2 });
     },
     stdoutBuf: () => Buffer.concat(outChunks),
     stdoutText: () => Buffer.concat(outChunks).toString('utf8'),
     stderrText: () => errLines.join('\n'),
+    infoText: () => infoLines.join('\n'),
     stdoutCalls: () => outChunks.length,
   };
 }
@@ -229,7 +233,7 @@ describe('unprotect', () => {
     expect(await h.run(['unprotect', '.env'])).toBe(0);
     const content = await readFile(join(dir, '.gitattributes'), 'utf8');
     expect(content).not.toContain('.env filter=securegit');
-    expect(h.stderrText()).toContain('stay encrypted');
+    expect(h.infoText()).toContain('stay encrypted');
   });
 
   it('is a silent no-op (exit 0) for a pattern that was never protected', async () => {
@@ -500,7 +504,7 @@ describe('key add-recipient / key remove-recipient / unlock via a recipient file
 
     // Machine B has no local keyring at all, but can still unlock.
     expect(await b.run(['unlock'])).toBe(0);
-    expect(b.stderrText()).toContain('unlocked via recipient');
+    expect(b.infoText()).toContain('unlocked via recipient');
 
     // Machine A encrypts; machine B, unlocked purely via the recipient file, decrypts.
     await a.run(['clean', '--', PATH], { stdin: PT });
@@ -728,6 +732,49 @@ describe('clean / smudge', () => {
     expect(await h.run(['clean', PATH], { stdin: PT })).toBe(4);
     expect(await h.run(['smudge', PATH], { stdin: PT })).toBe(4);
   });
+
+  describe('-v / --verbose', () => {
+    it('clean -v traces the path and generation to stderr, without plaintext or key material', async () => {
+      const h = harness();
+      await initAndUnlock(h);
+      expect(await h.run(['clean', '-v', '--', PATH], { stdin: PT })).toBe(0);
+      const trace = h.stderrText();
+      expect(trace).toContain(PATH);
+      expect(trace).toContain('generation');
+      expect(trace).not.toContain('timeout'); // the plaintext content
+      expect(trace).not.toContain('correct horse battery staple'); // the passphrase
+    });
+
+    it('clean without -v traces nothing', async () => {
+      const h = harness();
+      await initAndUnlock(h);
+      await h.run(['clean', '--', PATH], { stdin: PT });
+      expect(h.stderrText()).toBe('');
+    });
+
+    it('smudge --verbose traces the path and generation to stderr, without plaintext', async () => {
+      const h = harness();
+      await initAndUnlock(h);
+      await h.run(['clean', '--', PATH], { stdin: PT });
+      const ciphertext = h.stdoutBuf();
+
+      expect(await h.run(['smudge', '--verbose', '--', PATH], { stdin: ciphertext })).toBe(0);
+      const trace = h.stderrText();
+      expect(trace).toContain(PATH);
+      expect(trace).toContain('generation');
+      expect(trace).not.toContain('timeout');
+    });
+
+    it('smudge without --verbose traces nothing on the happy path', async () => {
+      const h = harness();
+      await initAndUnlock(h);
+      await h.run(['clean', '--', PATH], { stdin: PT });
+      const ciphertext = h.stdoutBuf();
+
+      await h.run(['smudge', '--', PATH], { stdin: ciphertext });
+      expect(h.stderrText()).toBe('');
+    });
+  });
 });
 
 describe('merge', () => {
@@ -810,6 +857,24 @@ describe('merge', () => {
     await writeFile(theirsFile, Buffer.from(THEIRS));
 
     expect(await h.run(['merge', '--', baseFile, oursFile, theirsFile, '7', PATH])).toBe(1);
+  });
+
+  it('-v traces the path, generation and outcome to stderr, without plaintext', async () => {
+    const h = harness();
+    await initAndUnlock(h);
+
+    const baseFile = join(dir, 'O');
+    const oursFile = join(dir, 'A');
+    const theirsFile = join(dir, 'B');
+    await encryptToFile(h, BASE, baseFile);
+    await encryptToFile(h, OURS, oursFile);
+    await encryptToFile(h, THEIRS, theirsFile);
+
+    expect(await h.run(['merge', '-v', '--', baseFile, oursFile, theirsFile, '7', PATH])).toBe(0);
+    const trace = h.stderrText();
+    expect(trace).toContain(PATH);
+    expect(trace).toContain('generation');
+    expect(trace).not.toContain('"a": 10'); // the plaintext content
   });
 });
 
@@ -1211,7 +1276,7 @@ describe('key rotate / reencrypt', () => {
 
         // The recipient can unlock and land on the new generation as current.
         expect(await recipient.run(['unlock'])).toBe(0);
-        expect(recipient.stderrText()).toContain('generation 2.');
+        expect(recipient.infoText()).toContain('generation 2.');
       } finally {
         await rm(recipientHome, { recursive: true, force: true });
       }
@@ -1606,5 +1671,57 @@ describe('unknown input', () => {
   it('exits 4 on an unrecognised command', async () => {
     const h = harness();
     expect(await h.run(['bogus'])).toBe(4);
+  });
+});
+
+// `--quiet` distinguishes three tiers of otherwise-undifferentiated stderr
+// output (10-cli-contract.md): success confirmations (io.info, suppressed),
+// errors and human-readable reports (io.stderr, never suppressed — a report
+// command's report is its actual deliverable, not a diagnostic aside).
+describe('--quiet', () => {
+  it('suppresses a success confirmation, without changing the exit code or the side effect', async () => {
+    const h = harness();
+    expect(await h.run(['init', '--quiet'])).toBe(0);
+    expect(h.infoText()).toBe('');
+    expect(h.stderrText()).toBe('');
+    // the side effect still happened — a keyring was actually written
+    expect(await h.run(['status'])).toBe(1); // locked, not misconfigured
+  });
+
+  it('without --quiet, the same command still prints its confirmation', async () => {
+    const h = harness();
+    expect(await h.run(['init'])).toBe(0);
+    expect(h.infoText()).toContain('initialized repository');
+  });
+
+  it('suppresses unlock\'s confirmation too', async () => {
+    const h = harness();
+    await h.run(['init']);
+    expect(await h.run(['unlock', '--quiet'])).toBe(0);
+    expect(h.infoText()).toBe('');
+  });
+
+  it('never suppresses an error message', async () => {
+    const h = harness();
+    await h.run(['init']);
+    expect(
+      await h.run(['unlock', '--quiet'], { env: { SECUREGIT_PASSPHRASE: 'a totally different passphrase' } }),
+    ).toBe(1);
+    expect(h.stderrText()).toContain('wrong passphrase');
+  });
+
+  it('never suppresses `status`\'s human-readable report', async () => {
+    const h = harness();
+    await h.run(['init']);
+    await h.run(['unlock']);
+    await h.run(['status', '--quiet']);
+    expect(h.stderrText()).toContain('padTo');
+  });
+
+  it('never suppresses `identity show`\'s human-readable report', async () => {
+    const h = harness();
+    await h.run(['identity', 'init']);
+    await h.run(['identity', 'show', '--quiet']);
+    expect(h.stderrText()).toContain('SGPUB1');
   });
 });

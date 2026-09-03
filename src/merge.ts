@@ -39,6 +39,8 @@ export interface MergeOptions {
   base: Buffer;
   ours: Buffer;
   theirs: Buffer;
+  /** `-v`/`--verbose`: one line, path/generation/outcome only. Never receives plaintext or key material. */
+  trace?: (message: string) => void;
 }
 
 export interface MergeResult {
@@ -144,6 +146,7 @@ export async function merge(opts: MergeOptions): Promise<MergeResult> {
       bindPath,
       ...(opts.padTo !== undefined ? { padTo: opts.padTo } : {}),
     });
+    opts.trace?.(`merge   ${opts.path}  generation ${current.keyId}  ${clean ? 'clean' : 'conflict'}`);
     return { clean, output };
   } finally {
     await rm(tmpDir, { recursive: true, force: true });

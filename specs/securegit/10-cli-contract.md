@@ -44,6 +44,53 @@ resolved (`node:path`'s `resolve`, so a relative path works) and the flag
 removed from `argv`. Every existing command case picks up the override for
 free, since none of them changes.
 
+`--quiet` is implemented too, splitting `CliIO`'s `stderr` into `stderr`
+(errors, and report-type commands' actual reports — never suppressed) and a
+new `info` (one-shot success confirmations — suppressed under `--quiet`).
+
+`-v`/`--verbose` is implemented for `clean`, `smudge` and `merge` — the
+three commands that actually perform a per-file operation. Unlike
+`--repo`, it is parsed the same way `--strict` already was: as one of the
+flags each command's own arg parser collects from *before* the `--`
+separator (`parsePathArg`'s existing `flags: Set<string>`, and a matching
+addition to `parseMergeArgs`), not stripped from `argv` globally in
+`runCli`. That's a deliberate difference from `--repo`: a path after `--`
+is allowed to begin with `-` ([02](02-git-integration.md)), and a global
+scan for `-v` anywhere in `argv` would risk matching a file that happens to
+be named `-v` rather than the flag. `FilterContext` and `MergeOptions` each
+gained an optional `trace?: (message: string) => void`, called at most
+once per invocation with a line naming the path, the generation, and (for
+`clean`/`smudge`) which branch was taken (encrypted, decrypted, or one of
+the passthrough cases) — never plaintext, never key material, same
+redaction discipline as `warn`. `cli.ts` wires `trace: io.stderr` only when
+the flag is present; the filter functions themselves don't know what
+"verbose" means, only whether a callback was given, so nothing changes for
+every existing non-verbose call site.
+
+`--quiet` is implemented too, and required splitting `CliIO`'s single
+`stderr` callback into two: `stderr` (unchanged — errors, and the reasoning
+below applies to report-type commands too) and a new `info` for one-shot
+success confirmations only (`init`'s "initialized repository …",
+`unlock`'s "unlocked (generation …)", `protect`/`unprotect`,
+`identity init`, `key add-recipient`/`remove-recipient`/`rotate`/
+`import-recovery`, `lock`). The naive reading of "suppress non-error
+stderr output" would also silence `status`, `identity show`, `verify`, and
+`inspect`'s human-readable reports — but a report command's report *is*
+its output, the same thing `--json` puts on stdout for a script instead of
+a human; suppressing it under `--quiet` would leave the command printing
+nothing at all on success, which is not what "quiet" means for a command
+whose entire job is to report. So those four, plus `reencrypt`'s per-file
+change summary and `key export-recovery`'s one-time recovery code (the
+only place that code is ever shown — it is not written to `--out`, only
+the encrypted file is), stay on `stderr`, exempt from `--quiet`, same as
+they were exempt from being a stdout writer in the first place. `runCli`
+checks `argv.includes('--quiet')` once, before dispatch, and — unlike
+`--repo` — does not need to strip the flag from `argv`: it takes no value,
+and no command does positional (index-based) parsing that an unconsumed
+`--quiet` token could be mistaken for. When present, `io.info` is swapped
+for a no-op; every command still just calls `io.info(...)`, unaware of
+whether it's live.
+
 ## Core Principle
 
 > Some of these commands have Git on the other end of the pipe. **stdout is a
@@ -170,15 +217,18 @@ English.
 | `--repo <path>` | Operate on a repository other than the current directory. Resolved against `cwd` (relative paths work), and stripped from `argv` before per-command parsing so a path value is never mistaken for a positional argument. Can appear before or after the command name. Missing its path argument exits 4. |
 | `--strict` | `smudge` fails rather than passing ciphertext through ([07](07-unlock-session.md)). |
 | `--json` | Machine-readable output for `status`, `verify` (all three forms), and `inspect` — the report object itself, `JSON.stringify`'d, straight to stdout. `key list`/`list-recipients` don't exist yet, so `--json` has nothing to do for them. |
-| `--quiet` | Suppress non-error stderr output. |
-| `-v`, `--verbose` | Per-file tracing to stderr. Never includes plaintext, key material, or a passphrase. |
+| `--quiet` | Suppress one-shot success confirmations (`io.info`). Never suppresses errors or a report command's actual report (`status`, `identity show`, `verify`, `inspect`, `reencrypt`, `key export-recovery`'s recovery code) — those stay on `stderr` regardless, same as they were never a stdout writer. |
+| `-v`, `--verbose` | Per-file tracing to stderr, on `clean`/`smudge`/`merge` only. Never includes plaintext, key material, or a passphrase. Parsed like `--strict` — before the `--` separator, not stripped from `argv` globally like `--repo`, so a path beginning with `-` after `--` is never at risk of being mistaken for the flag. |
 
 ## Implementation: `src/cli.ts`
 
 `runCli(io: CliIO): Promise<number>` is the whole surface — every command is a
 plain function of an injected `CliIO` (`argv`, `cwd`, `env`, `stdin` as a
-pre-read `Buffer`, `home`, and `stdout`/`stderr` as callbacks), never touching
-`process.*` directly. `src/bin/securegit.ts` is the only place that does: it
+pre-read `Buffer`, `home`, and `stdout`/`stderr`/`info` as callbacks), never
+touching `process.*` directly. `stderr` and `info` both write to the real
+`process.stderr` in `bin/securegit.ts` — the only difference between them is
+that `runCli` swaps `info` for a no-op when `--quiet` is present; `stderr`
+is always live. `src/bin/securegit.ts` is the only place that does: it
 reads real stdin to a `Buffer`, wires real `process.argv`/`env`/`homedir()`,
 and sets `process.exitCode`. This is what makes the entire CLI testable
 without spawning a subprocess per test — `src/cli.test.ts` drives `runCli`
@@ -254,12 +304,15 @@ it, don't exist yet).
 | `clean`/`smudge` round-trip through the real CLI with `padTo` set, `padded` flag correctly recorded | `src/cli.test.ts` | — | ✅ |
 | `encrypt`/`decrypt` round-trip via stdin and stdout | `src/cli.test.ts` | — | ✅ |
 | `encrypt`/`decrypt` produce the same bytes as the filters | `src/cli.test.ts` | — | 🔲 |
-| No command prints key material at `--verbose` | `src/cli.test.ts` | — | 🔲 |
+| No command prints key material at `--verbose` | `src/cli.test.ts` | — | ✅ |
 | A key object interpolated into a string yields `[redacted]` | `src/crypto.test.ts` | — | ✅ |
 | Error messages name the offending path | `src/cli.test.ts` | — | ✅ |
 | No error message contains plaintext bytes | `src/cli.test.ts` | `blobs/` | 🔲 |
 | `--repo` operates on the named repository, before or after the command, relative paths resolve against `cwd` | `src/cli.test.ts` | — | ✅ |
 | `--repo` with no path argument exits 4 | `src/cli.test.ts` | — | ✅ |
+| `--quiet` suppresses a success confirmation without changing the exit code or side effect | `src/cli.test.ts` | — | ✅ |
+| `--quiet` never suppresses an error message | `src/cli.test.ts` | — | ✅ |
+| `--quiet` never suppresses `status`'s or `identity show`'s human-readable report | `src/cli.test.ts` | — | ✅ |
 | `protect` keeps the `.securegit/**` exclusion last | `src/install.test.ts` | — | ✅ |
 | `unprotect` removes the pattern, keeping the exclusion line | `src/install.test.ts` | — | ✅ |
 | `unprotect` removes only the named pattern, leaving others intact | `src/install.test.ts` | — | ✅ |

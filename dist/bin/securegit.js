@@ -63,6 +63,9 @@ async function main() {
         stderr: (message) => {
             process.stderr.write(`${message}\n`);
         },
+        info: (message) => {
+            process.stderr.write(`${message}\n`);
+        },
     });
     process.exitCode = code;
 }

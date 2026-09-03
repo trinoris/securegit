@@ -48,6 +48,7 @@ export function clean(input, ctx) {
             if (rmk !== null) {
                 try {
                     unsealFor(input, rmk, ctx);
+                    ctx.trace?.(`clean   ${ctx.path}  passthrough (already generation ${header.keyId})`);
                     return input;
                 }
                 catch {
@@ -56,7 +57,7 @@ export function clean(input, ctx) {
             }
         }
     }
-    return seal(input, {
+    const out = seal(input, {
         rmk: current.rmk,
         keyId: current.keyId,
         path: ctx.path,
@@ -64,6 +65,8 @@ export function clean(input, ctx) {
         ...(ctx.maxBytes !== undefined ? { maxBytes: ctx.maxBytes } : {}),
         ...(ctx.padTo !== undefined ? { padTo: ctx.padTo } : {}),
     });
+    ctx.trace?.(`clean   ${ctx.path}  generation ${current.keyId}`);
+    return out;
 }
 /** `unseal` with `maxBytes` included only when the caller set one. */
 function unsealFor(envelope, rmk, ctx) {
@@ -89,6 +92,7 @@ function missingKeyMessage(path, wanted, held) {
 export function smudge(input, ctx) {
     if (!looksLikeEnvelope(input)) {
         // Predates securegit, or was committed with the filter uninstalled.
+        ctx.trace?.(`smudge  ${ctx.path}  passthrough (not encrypted)`);
         return input;
     }
     const header = parseEnvelope(input); // malformed envelope: let this throw
@@ -104,10 +108,13 @@ export function smudge(input, ctx) {
                 : new EnvelopeError(message);
         }
         warn(message);
+        ctx.trace?.(`smudge  ${ctx.path}  passthrough (missing generation ${header.keyId})`);
         return input;
     }
     try {
-        return unsealFor(input, rmk, ctx);
+        const out = unsealFor(input, rmk, ctx);
+        ctx.trace?.(`smudge  ${ctx.path}  generation ${header.keyId}`);
+        return out;
     }
     catch (e) {
         // Authentication failure: never pass this through, strict or not.

@@ -102,6 +102,7 @@ export async function merge(opts) {
             bindPath,
             ...(opts.padTo !== undefined ? { padTo: opts.padTo } : {}),
         });
+        opts.trace?.(`merge   ${opts.path}  generation ${current.keyId}  ${clean ? 'clean' : 'conflict'}`);
         return { clean, output };
     }
     finally {

@@ -209,7 +209,7 @@ rather than mysterious.
 | `clean` of empty input round-trips | `src/filter.test.ts` | — | ✅ |
 | `clean` of already-ciphertext is a passthrough | `src/filter.test.ts` | `envelopes/` | ✅ |
 | `install` writes `required = true` | `src/install.test.ts` | — | ✅ |
-| Filter exiting non-zero aborts `git add` rather than storing plaintext | `src/git.integration.test.ts` | `repo-protected/` | 🔲 |
+| Filter exiting non-zero aborts `git add` rather than storing plaintext | `src/git.integration.test.ts` | `repo-protected/` | ✅ |
 | `install` writes `-text` on every protected pattern | `src/install.test.ts` | — | ✅ |
 | Round-trip survives `core.autocrlf=true` | `src/git.integration.test.ts` | `repo-protected/` | 🔲 |
 | Round-trip survives an inherited `* text` attribute | `src/git.integration.test.ts` | `attributes/` | 🔲 |

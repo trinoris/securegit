@@ -102,8 +102,19 @@ export interface CliIO {
   home: string;
   /** The content channel. Only clean/smudge/textconv/encrypt/decrypt write here. */
   stdout: (chunk: Buffer) => void;
-  /** Every diagnostic, prompt and warning. Never receives plaintext or key material. */
+  /**
+   * Errors, and every report-type command's actual human-readable report
+   * (status, identity show, verify, inspect) — that report is the point of
+   * running the command, not a diagnostic aside, so `--quiet` never touches
+   * it. Never receives plaintext or key material.
+   */
   stderr: (message: string) => void;
+  /**
+   * One-shot success confirmations ("initialized repository …", "unlocked
+   * (generation …)") — suppressed under `--quiet`, unlike `stderr`. Never
+   * receives plaintext or key material.
+   */
+  info: (message: string) => void;
   now?: () => Date;
 }
 
@@ -180,7 +191,7 @@ async function cmdInit(args: string[], io: CliIO): Promise<number> {
   const keyringPath = resolveKeyringPath(config.repoId, io.home);
   await writeKeyringFile(keyringPath, created.file);
 
-  io.stderr(
+  io.info(
     `securegit: initialized repository ${config.repoId}\n` +
       `  keyring: ${keyringPath}\n` +
       `  next:    securegit protect <pattern>, then securegit unlock`,
@@ -207,7 +218,7 @@ async function cmdInstall(args: string[], io: CliIO): Promise<number> {
     io.stderr((e as Error).message);
     return EXIT_MISCONFIGURED;
   }
-  io.stderr(`securegit: filter configuration installed${useProcess ? ' (process form)' : ''}`);
+  io.info(`securegit: filter configuration installed${useProcess ? ' (process form)' : ''}`);
   return EXIT_OK;
 }
 
@@ -224,7 +235,7 @@ async function cmdProtect(args: string[], io: CliIO): Promise<number> {
     io.stderr((e as Error).message);
     return EXIT_USAGE;
   }
-  io.stderr(`securegit: protecting ${patterns.join(', ')}`);
+  io.info(`securegit: protecting ${patterns.join(', ')}`);
   return EXIT_OK;
 }
 
@@ -240,7 +251,7 @@ async function cmdUnprotect(args: string[], io: CliIO): Promise<number> {
     io.stderr((e as Error).message);
     return EXIT_USAGE;
   }
-  io.stderr(
+  io.info(
     `securegit: no longer protecting ${patterns.join(', ')}\n` +
       '  warning: blobs already committed under this pattern stay encrypted — this only\n' +
       '           changes what happens the next time the file is edited and re-added\n' +
@@ -332,7 +343,7 @@ async function cmdUnlockViaRecipient(config: RepoConfig, args: string[], io: Cli
 
   const code = await writeUnlockSession(config, io, keys, args);
   if (code === EXIT_OK) {
-    io.stderr(`securegit: unlocked via recipient (generation ${keys.current()!.keyId})`);
+    io.info(`securegit: unlocked via recipient (generation ${keys.current()!.keyId})`);
   }
   return code;
 }
@@ -373,7 +384,7 @@ async function cmdUnlock(args: string[], io: CliIO): Promise<number> {
   }
 
   const code = await writeUnlockSession(config, io, keys, args);
-  io.stderr(`securegit: unlocked (generation ${current.keyId})`);
+  io.info(`securegit: unlocked (generation ${current.keyId})`);
   return code;
 }
 
@@ -386,7 +397,7 @@ async function cmdLock(_args: string[], io: CliIO): Promise<number> {
     return EXIT_MISCONFIGURED;
   }
   await lockSession({ repoId: config.repoId, path: sessionPathFor(config, io) });
-  io.stderr('securegit: locked');
+  io.info('securegit: locked');
   return EXIT_OK;
 }
 
@@ -453,7 +464,7 @@ async function cmdIdentityInit(args: string[], io: CliIO): Promise<number> {
   }
   await writeIdentityFile(path, created.file);
 
-  io.stderr(
+  io.info(
     `securegit: identity created\n` +
       `  fingerprint: ${created.file.fingerprint}\n` +
       `  public key:  ${created.file.publicKey}\n` +
@@ -541,7 +552,7 @@ async function cmdKeyAddRecipient(args: string[], io: CliIO): Promise<number> {
   };
   await writeRecipientFile(recipientPath(io.cwd, fingerprint), file);
 
-  io.stderr(
+  io.info(
     `securegit: added recipient ${fingerprint}${label ? ` (${label})` : ''}\n` +
       `  action: git add .securegit/recipients && git commit && git push`,
   );
@@ -585,7 +596,7 @@ async function cmdKeyRemoveRecipient(args: string[], io: CliIO): Promise<number>
     generations,
   });
 
-  io.stderr(
+  io.info(
     `securegit: removed recipient ${fingerprint}\n` +
       `  warning: they can still read every blob committed under generations they already held\n` +
       `  action: \`securegit key rotate\` then \`securegit reencrypt\` to stop them receiving new ones\n` +
@@ -712,7 +723,7 @@ async function cmdKeyRotate(args: string[], io: CliIO): Promise<number> {
   await writeKeyringFile(keyringPath, rotated.file);
   await lockSession({ repoId: loaded.config.repoId, path: sessionPathFor(loaded.config, io) });
 
-  io.stderr(
+  io.info(
     `securegit: rotated to generation ${newGeneration}\n` +
       `  recipients rewrapped: ${rewrapped}\n` +
       `  action: securegit unlock` +
@@ -875,7 +886,7 @@ async function cmdKeyImportRecovery(args: string[], io: CliIO): Promise<number> 
     .map((g) => g.generation)
     .sort((a, b) => a - b)
     .join(', ');
-  io.stderr(
+  io.info(
     `securegit: imported recovery file — local keyring now holds generation${recovered.length === 1 ? '' : 's'} ${generationList}\n` +
       `  keyring: ${keyringPath}\n` +
       `  action: securegit unlock`,
@@ -1191,12 +1202,14 @@ async function cmdClean(args: string[], io: CliIO): Promise<number> {
   const loaded = await loadKeys(io);
   if (!loaded.ok) return loaded.code;
 
+  const verbose = parsed.flags.has('-v') || parsed.flags.has('--verbose');
   try {
     const out = clean(io.stdin, {
       keys: loaded.keys,
       path: parsed.path,
       bindPath: loaded.config.bindPath,
       padTo: loaded.config.padTo,
+      ...(verbose ? { trace: io.stderr } : {}),
     });
     io.stdout(out);
     return EXIT_OK;
@@ -1215,6 +1228,7 @@ async function cmdSmudge(args: string[], io: CliIO): Promise<number> {
   const loaded = await loadKeys(io);
   if (!loaded.ok) return loaded.code;
 
+  const verbose = parsed.flags.has('-v') || parsed.flags.has('--verbose');
   try {
     const out = smudge(io.stdin, {
       keys: loaded.keys,
@@ -1222,6 +1236,7 @@ async function cmdSmudge(args: string[], io: CliIO): Promise<number> {
       bindPath: loaded.config.bindPath,
       strict: parsed.flags.has('--strict'),
       warn: io.stderr,
+      ...(verbose ? { trace: io.stderr } : {}),
     });
     io.stdout(out);
     return EXIT_OK;
@@ -1257,6 +1272,7 @@ interface ParsedMergeArgs {
   theirsPath: string;
   markerSize: number;
   path: string;
+  flags: Set<string>;
 }
 
 /** `securegit merge -- %O %A %B %L %P` — base, ours, theirs, marker size, path. */
@@ -1267,7 +1283,7 @@ function parseMergeArgs(args: string[]): ParsedMergeArgs | null {
   if (!basePath || !oursPath || !theirsPath || !markerSizeArg || !path) return null;
   const markerSize = Number(markerSizeArg);
   if (!Number.isInteger(markerSize)) return null;
-  return { basePath, oursPath, theirsPath, markerSize, path };
+  return { basePath, oursPath, theirsPath, markerSize, path, flags: new Set(args.slice(0, sepIdx)) };
 }
 
 async function cmdMerge(args: string[], io: CliIO): Promise<number> {
@@ -1285,6 +1301,7 @@ async function cmdMerge(args: string[], io: CliIO): Promise<number> {
     readFile(parsed.theirsPath),
   ]);
 
+  const verbose = parsed.flags.has('-v') || parsed.flags.has('--verbose');
   try {
     const result = await merge({
       keys: loaded.keys,
@@ -1295,6 +1312,7 @@ async function cmdMerge(args: string[], io: CliIO): Promise<number> {
       base,
       ours,
       theirs,
+      ...(verbose ? { trace: io.stderr } : {}),
     });
     // %A must always be overwritten, clean or not — that's how Git knows what
     // to show in the worktree, and `smudge` decrypts it either way.
@@ -1546,6 +1564,16 @@ export async function runCli(io: CliIO): Promise<number> {
       cwd: resolve(io.cwd, repoArg),
       argv: [...io.argv.slice(0, repoIdx), ...io.argv.slice(repoIdx + 2)],
     };
+  }
+
+  // `--quiet` is global too, but unlike `--repo` it takes no value and no
+  // command does positional (index-based) argv parsing that a stray
+  // `--quiet` token could be mistaken for — every command either checks a
+  // specific named flag or filters out anything starting with `--`. So
+  // nothing needs to be stripped: just swap in a no-op `info` and leave the
+  // rest of argv untouched.
+  if (io.argv.includes('--quiet')) {
+    io = { ...io, info: () => {} };
   }
 
   const [cmd, ...rest] = io.argv;

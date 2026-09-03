@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { seal, unseal, looksLikeEnvelope, parseEnvelope } from './envelope.js';
@@ -93,6 +93,49 @@ describe('merge()', () => {
     expect(result.output.includes(Buffer.from('"a": 10'))).toBe(false);
     const header = parseEnvelope(result.output);
     expect(header.keyId).toBe(KEY_ID);
+  });
+
+  it('calls trace with the path and generation, only when given a callback', async () => {
+    const trace = vi.fn();
+    await merge({
+      keys: unlocked(),
+      path: PATH,
+      base: env(BASE),
+      ours: env(OURS_NONCONFLICT),
+      theirs: env(THEIRS_NONCONFLICT),
+      trace,
+    });
+
+    expect(trace).toHaveBeenCalledTimes(1);
+    const line = String(trace.mock.calls[0]![0]);
+    expect(line).toContain(PATH);
+    expect(line).toContain(KEY_ID);
+    expect(line).not.toContain('"a": 10'); // no plaintext
+    expect(line).not.toContain(RMK.toString('hex')); // no key material
+  });
+
+  it('traces a conflict outcome too, distinguishably from a clean one', async () => {
+    const cleanTrace = vi.fn();
+    await merge({
+      keys: unlocked(),
+      path: PATH,
+      base: env(BASE),
+      ours: env(OURS_NONCONFLICT),
+      theirs: env(THEIRS_NONCONFLICT),
+      trace: cleanTrace,
+    });
+
+    const conflictTrace = vi.fn();
+    await merge({
+      keys: unlocked(),
+      path: PATH,
+      base: env(BASE),
+      ours: env(OURS_CONFLICT),
+      theirs: env(THEIRS_CONFLICT),
+      trace: conflictTrace,
+    });
+
+    expect(String(cleanTrace.mock.calls[0]![0])).not.toBe(String(conflictTrace.mock.calls[0]![0]));
   });
 
   it('reports a real conflict: clean is false and the result carries plaintext markers once decrypted', async () => {

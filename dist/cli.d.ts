@@ -15,8 +15,19 @@ export interface CliIO {
     home: string;
     /** The content channel. Only clean/smudge/textconv/encrypt/decrypt write here. */
     stdout: (chunk: Buffer) => void;
-    /** Every diagnostic, prompt and warning. Never receives plaintext or key material. */
+    /**
+     * Errors, and every report-type command's actual human-readable report
+     * (status, identity show, verify, inspect) — that report is the point of
+     * running the command, not a diagnostic aside, so `--quiet` never touches
+     * it. Never receives plaintext or key material.
+     */
     stderr: (message: string) => void;
+    /**
+     * One-shot success confirmations ("initialized repository …", "unlocked
+     * (generation …)") — suppressed under `--quiet`, unlike `stderr`. Never
+     * receives plaintext or key material.
+     */
+    info: (message: string) => void;
     now?: () => Date;
 }
 /**

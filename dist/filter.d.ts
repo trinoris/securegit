@@ -33,6 +33,8 @@ export interface FilterContext {
     strict?: boolean;
     /** Defaults to `console.error`. Never receives plaintext or key material. */
     warn?: (message: string) => void;
+    /** `-v`/`--verbose`: one line per invocation, path and generation only. Never receives plaintext or key material. Silent (not even the default `warn` sink) unless set. */
+    trace?: (message: string) => void;
 }
 /**
  * Plaintext or (already-authenticated) ciphertext in, ciphertext out. Always.

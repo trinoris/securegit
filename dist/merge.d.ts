@@ -15,6 +15,8 @@ export interface MergeOptions {
     base: Buffer;
     ours: Buffer;
     theirs: Buffer;
+    /** `-v`/`--verbose`: one line, path/generation/outcome only. Never receives plaintext or key material. */
+    trace?: (message: string) => void;
 }
 export interface MergeResult {
     /** false when conflict markers remain in the result. */

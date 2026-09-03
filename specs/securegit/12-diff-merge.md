@@ -200,9 +200,9 @@ exit 0/1.
 |------|-----------|---------|--------|
 | `textconv` decrypts a blob for display | `src/filter.test.ts` | `blobs/` | ✅ |
 | `git diff` shows a plaintext hunk | `src/git.integration.test.ts` | `repo-protected/` | ✅ |
-| `git log -p` shows plaintext across commits | `src/git.integration.test.ts` | `repo-protected/` | 🔲 |
+| `git log -p` shows plaintext across commits | `src/git.integration.test.ts` | `repo-protected/` | ✅ |
 | `textconv` while locked prints the placeholder and exits 0 | `src/filter.test.ts` | — | ✅ |
-| `textconv` never writes to the object database | `src/git.integration.test.ts` | `repo-protected/` | 🔲 |
+| `textconv` never writes to the object database | `src/git.integration.test.ts` | `repo-protected/` | ✅ (`git count-objects` is unchanged across a `log -p` that invokes `textconv`) |
 | `install` sets `cachetextconv = false` | `src/install.test.ts` | — | ✅ |
 | `install` writes `merge.securegit.name`/`.driver`, `protect` writes `merge=securegit` | `src/install.test.ts` | — | ✅ |
 | `install` refuses to overwrite a foreign `merge.securegit.driver` (T10) | `src/install.test.ts` | — | ✅ |
