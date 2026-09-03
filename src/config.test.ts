@@ -113,6 +113,29 @@ describe('initConfig()', () => {
     }
   });
 
+  it('refuses when the keyring would resolve inside the repository working tree', async () => {
+    const home = join(dir, 'fake-home'); // home nested inside the repo itself
+    await expect(initConfig(dir, { home })).rejects.toBeInstanceOf(ConfigError);
+  });
+
+  it('refuses when home is the repository itself', async () => {
+    await expect(initConfig(dir, { home: dir })).rejects.toBeInstanceOf(ConfigError);
+  });
+
+  it('proceeds normally when home is outside the repository', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'securegit-config-home-'));
+    try {
+      await expect(initConfig(dir, { home })).resolves.toBeDefined();
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  it('skips the check entirely when home is not given', async () => {
+    // Existing callers that never pass `home` keep working unchanged.
+    await expect(initConfig(dir)).resolves.toBeDefined();
+  });
+
   it('refuses to run twice, and leaves the original config untouched', async () => {
     const first = await initConfig(dir);
     await expect(initConfig(dir)).rejects.toBeInstanceOf(ConfigError);

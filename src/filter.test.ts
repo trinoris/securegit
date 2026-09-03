@@ -148,6 +148,24 @@ describe('clean()', () => {
     expect(() => smudge(bound, ctx({ path: 'elsewhere.json' }))).toThrow();
   });
 
+  it("changing bindPath in config does not silently break old blobs — decrypt always uses each envelope's own recorded flag", () => {
+    // 05-key-hierarchy.md: bindPath can't be changed in place (there is no
+    // primitive for it), but the invariant this row asks for holds
+    // structurally anyway — unseal() has no bindPath parameter at all, so
+    // it cannot read anything but what the envelope itself recorded, no
+    // matter what a caller's own "current config" setting is.
+    const bound = clean(PT, ctx({ bindPath: true }));
+    const unbound = clean(PT, ctx({ bindPath: false }));
+
+    // Both decrypt correctly under the SAME ctx.bindPath value — proof that
+    // ctx.bindPath is consulted on the clean/encrypt side only, never on
+    // the smudge/decrypt side.
+    expect(smudge(bound, ctx({ bindPath: false })).equals(PT)).toBe(true);
+    expect(smudge(unbound, ctx({ bindPath: false })).equals(PT)).toBe(true);
+    expect(smudge(bound, ctx({ bindPath: true })).equals(PT)).toBe(true);
+    expect(smudge(unbound, ctx({ bindPath: true })).equals(PT)).toBe(true);
+  });
+
   it('handles a path beginning with a dash', () => {
     expect(looksLikeEnvelope(clean(PT, ctx({ path: '-weird-name.env' })))).toBe(true);
   });

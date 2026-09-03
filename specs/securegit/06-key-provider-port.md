@@ -134,7 +134,16 @@ to be a visible trade rather than an accident of configuration.
   once-per-session unlock, not a per-file operation. Parameters are stored in
   the keyring so they can be raised later without breaking existing keyrings; a
   keyring wrapped at `2^16` is re-wrapped at the new cost on the next successful
-  unlock.
+  unlock. Implemented as `rewrapOutdatedGenerations()` in `src/keyring.ts`,
+  called only from `cmdUnlock` in `src/cli.ts` — deliberately not folded into
+  `unlockKeyring()` itself, which stays a pure read with no side effects,
+  since that same function backs every filter-time unwrap too (including
+  `SECUREGIT_PASSPHRASE`, [07](07-unlock-session.md)), and a filter must
+  never write to disk. Best-effort: a re-wrap failure never fails the
+  `unlock` that triggered it. Only `passphrase-file`'s own `state.N` is
+  compared against the provider's current default; a slot from any other
+  provider is left alone, since there's nothing generic about "raise the
+  cost" to check across providers yet.
 - **The AAD binds `repoId` and `generation`**, so a wrapped key copied into
   another repository's keyring — or wrapped again under a fresh salt for the
   same repository and generation — fails to unwrap under the wrong copy rather
@@ -212,7 +221,7 @@ always have at least one non-custodial way back in.
 | Two `wrap` calls on one key produce different payloads | `src/provider.test.ts` | — | ✅ |
 | Wrong passphrase fails with a distinguishable error, not a crash | `src/provider.test.ts` | — | ✅ |
 | scrypt parameters round-trip through the keyring | `src/keyring.test.ts` | — | ✅ |
-| Raised scrypt parameters re-wrap on next unlock | `src/keyring.test.ts` | — | 🔲 |
+| Raised scrypt parameters re-wrap on next unlock | `src/keyring.test.ts` | — | ✅ |
 | `available()` never prompts | `src/provider.conformance.test.ts` | — | ✅ |
 | Passphrase under 12 characters is refused at `init` | `src/provider.test.ts` | — | ✅ |
 | Removing the last non-custodial provider is refused | `src/keyring.test.ts` | — | 🔲 |

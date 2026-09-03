@@ -548,7 +548,32 @@ This time no existing test broke — the harness-default interaction was
 anticipated going in. Every row in the precedence table is now
 implemented.
 
-662 unit tests total, all green; 40 integration tests, all green. TypeScript,
+The rest of the backlog closed too, plus two items outside it.
+`bindPath` changing config doesn't silently break old blobs turned out
+structural, not just untested: `unseal()` has no `bindPath` parameter, so
+decrypt always uses each envelope's own recorded flag. A keyring resolving
+inside a repository's working tree is refused at `init` now (a new
+optional `home` check in `initConfig()`), defense in depth alongside
+`verify`'s existing check. `encrypt`/`decrypt` are proved byte-identical to
+`clean`/`smudge`, and new tests prove no error message — corrupted
+envelope, locked clean, missing-generation warning — ever leaks the
+plaintext behind it. Outside the plan: "raised scrypt parameters re-wrap on
+next unlock" was a real unbuilt feature (`unlockKeyring()` never wrote
+anything back) — built as a separate `rewrapOutdatedGenerations()`, called
+only from `cmdUnlock`, deliberately never folded into `unlockKeyring()`
+itself, which every filter-time unwrap shares and which must never write
+to disk. And T13's `filter-process` byte-bounding already had a real
+mechanism (a running total checked packet by packet) but no test proving
+it triggers mid-stream across several packets, not only against one
+packet already too big on its own.
+
+Every row from the original backlog plan, and both items found outside
+it, are closed. Only the plan's explicitly deferred items remain
+(`key add-provider`/`remove-provider`/`list`/`list-recipients`, refusing
+removal of the last recipient, `padTo`/`bindPath` change-refusal, F13's
+race), each still deferred for the same stated reasons.
+
+679 unit tests total, all green; 40 integration tests, all green. TypeScript,
 `src/` → `dist/`, unit tests beside the source, matching
 `@trinoris/decision-core`.
 

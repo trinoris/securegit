@@ -22,6 +22,7 @@ import {
   keyringFromRecoveredGenerations,
   parseKeyId,
   readKeyringFile,
+  rewrapOutdatedGenerations,
   rotateKeyring,
   unlockKeyring,
   writeKeyringFile,
@@ -290,7 +291,7 @@ async function cmdInit(args: string[], io: CliIO): Promise<number> {
 
   let config: RepoConfig;
   try {
-    config = await initConfig(io.cwd, { bindPath, ...(padTo !== undefined ? { padTo } : {}) });
+    config = await initConfig(io.cwd, { bindPath, home: io.home, ...(padTo !== undefined ? { padTo } : {}) });
   } catch (e) {
     io.stderr((e as Error).message);
     return e instanceof ConfigError ? EXIT_USAGE : EXIT_USAGE;
@@ -500,6 +501,19 @@ async function cmdUnlock(args: string[], io: CliIO): Promise<number> {
       "securegit: could not unlock — wrong passphrase, or this keyring holds none of the repository's generations",
     );
     return EXIT_LOCKED;
+  }
+
+  // 06-key-provider-port.md: a keyring wrapped at an old scrypt cost is
+  // re-wrapped at the current one on the next successful unlock. Never
+  // blocks the unlock itself — this is hygiene, not a precondition for it.
+  try {
+    const { file: rewrapped, changed } = await rewrapOutdatedGenerations(file, [provider], keys);
+    if (changed) {
+      await writeKeyringFile(keyringPath, rewrapped);
+      io.info('securegit: keyring re-wrapped at the current scrypt cost');
+    }
+  } catch {
+    // best-effort — a re-wrap failure here must not fail the unlock
   }
 
   const code = await writeUnlockSession(config, io, keys, args);

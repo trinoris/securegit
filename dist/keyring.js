@@ -10,6 +10,7 @@ import { mkdir, readFile, rename, writeFile, unlink } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { equalCt, keyFingerprint, secret } from './crypto.js';
+import { DEFAULT_SCRYPT_N } from './provider.js';
 export class KeyringError extends Error {
     code = 'KEYRING';
     constructor(message) {
@@ -172,6 +173,54 @@ export async function unlockKeyring(file, providers, opts = {}) {
             return [...held.keys()];
         },
     };
+}
+/**
+ * "Parameters are stored in the keyring so they can be raised later without
+ * breaking existing keyrings; a keyring wrapped at 2^16 is re-wrapped at
+ * the new cost on the next successful unlock" (06-key-provider-port.md).
+ * Deliberately separate from `unlockKeyring()` itself, which stays a pure
+ * read — every filter-time unwrap (`loadKeys()`'s `SECUREGIT_PASSPHRASE`
+ * source included) goes through that same function, and a filter must
+ * never write to disk. Only `cmdUnlock`, the one place a real `unlock`
+ * happens, calls this, and only after a successful unlock already produced
+ * `keys`.
+ *
+ * Only `passphrase-file` has a cost to raise (`state.N`); slots from any
+ * other provider are left untouched — there's nothing generic about "raise
+ * the cost" across providers yet, and only one provider exists to prove it
+ * against. A generation this unlock didn't actually hold (`keys.find()`
+ * returns `null`) is left as-is too — there is no RMK on hand to re-wrap.
+ */
+export async function rewrapOutdatedGenerations(file, providers, keys) {
+    const byId = new Map(providers.map((p) => [p.id, p]));
+    let changed = false;
+    const generations = await Promise.all(file.generations.map(async (gen) => {
+        const keyId = keyIdFor(gen.generation, gen.fingerprint);
+        const rmk = keys.find(keyId);
+        if (!rmk)
+            return gen;
+        const wrapped = await Promise.all(gen.wrapped.map(async (slot) => {
+            if (slot.provider !== 'passphrase-file')
+                return slot;
+            const n = slot.state.N;
+            if (typeof n !== 'number' || n >= DEFAULT_SCRYPT_N)
+                return slot;
+            const provider = byId.get(slot.provider);
+            if (!provider)
+                return slot;
+            const state = await provider.init({ repoId: file.repoId, generation: gen.generation });
+            const rewrapped = await provider.wrap(rmk, {
+                repoId: file.repoId,
+                generation: gen.generation,
+                state,
+                interactive: true,
+            });
+            changed = true;
+            return { provider: rewrapped.provider, state, payload: rewrapped.payload };
+        }));
+        return { ...gen, wrapped };
+    }));
+    return { file: { ...file, generations }, changed };
 }
 /**
  * Writes the keyring atomically (temp file + rename, so a crash mid-write

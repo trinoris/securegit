@@ -179,9 +179,14 @@ here once and, per above, cannot be changed without a rotation.
 | RMK wrapped to a recipient | `.securegit/recipients/*.json` **in the repo** | X25519 public-key encryption ([08](08-multi-recipient.md)) |
 | RMK wrapped to a recovery code | an exported file, wherever the user puts it | high-entropy code, held offline ([09](09-rotation-recovery.md)) |
 
-Nothing in this table places unwrapped key material inside the repository, and
-`verify` ([13](13-verify.md)) checks that `~/.securegit` is not inside any
-repository working tree — a mistake that would otherwise be committed.
+Nothing in this table places unwrapped key material inside the repository.
+`initConfig()` (`src/config.ts`) now refuses this mistake at the source: an
+optional `home` option, always passed by `cli.ts`'s `cmdInit`, checks
+whether `home`'s own `.securegit` root would resolve inside the repository
+being initialised (nested under it, or the repository itself) and throws
+before anything is written. Optional so every existing caller that never
+passed `home` at all keeps working — this is `init`-time defense in depth
+on top of, not instead of, `verify`'s own equivalent check.
 
 ## Test Cases
 
@@ -196,8 +201,8 @@ repository working tree — a mistake that would otherwise be committed.
 | Mismatched fingerprint produces a diagnostic, not a tag failure | `src/keyring.test.ts` | — | ✅ |
 | `bindPath=true` envelope fails under a different path | `src/envelope.test.ts` | — | ✅ |
 | `bindPath` is recorded in `flags` and honoured on decrypt | `src/envelope.test.ts` | — | ✅ |
-| Changing `bindPath` in config does not silently break old blobs | `src/keyring.test.ts` | — | 🔲 |
-| Keyring inside a working tree is refused at `init` | `src/config.test.ts` | — | 🔲 |
+| Changing `bindPath` in config does not silently break old blobs | `src/filter.test.ts` | — | ✅ (`unseal()` has no `bindPath` parameter at all — decrypt always uses each envelope's own recorded flag, structurally, never a caller's "current config" value; `keyring.ts` has no bindPath concept to test in the first place) |
+| Keyring inside a working tree is refused at `init` | `src/config.test.ts` | — | ✅ |
 | Keyring file is created with mode `0600` | `src/keyring.test.ts` | — | ✅ |
 
 ## Relationship to Other Specs

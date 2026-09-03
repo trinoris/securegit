@@ -6,7 +6,7 @@
 // needs.
 // See specs/securegit/02-git-integration.md and 05-key-hierarchy.md.
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, relative, isAbsolute, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 export class ConfigError extends Error {
     code = 'CONFIG';
@@ -36,6 +36,11 @@ async function isGitRepo(repoDir) {
         return false;
     }
 }
+/** True when `child` is `parent` itself or nested under it. */
+function isInside(child, parent) {
+    const rel = relative(parent, child);
+    return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+}
 export async function initConfig(repoDir, opts = {}) {
     if (!(await isGitRepo(repoDir))) {
         throw new ConfigError(`securegit: ${repoDir} is not a Git repository (no .git found)`);
@@ -43,6 +48,11 @@ export async function initConfig(repoDir, opts = {}) {
     const padTo = opts.padTo ?? 0;
     if (!Number.isInteger(padTo) || padTo < 0) {
         throw new ConfigError(`securegit: padTo must be a non-negative integer, got ${padTo}`);
+    }
+    if (opts.home !== undefined && isInside(resolve(opts.home, '.securegit'), resolve(repoDir))) {
+        throw new ConfigError(`securegit: refusing to initialise — the keyring at ${resolve(opts.home, '.securegit')} ` +
+            `would live inside this repository's own working tree (${resolve(repoDir)})\n` +
+            `  action: set HOME to a location outside the repository`);
     }
     const path = configPath(repoDir);
     try {

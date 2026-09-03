@@ -303,11 +303,11 @@ it, don't exist yet).
 | `init --pad-to` sets `padTo`; `0` by default; a negative or non-numeric value exits 4 | `src/cli.test.ts` | — | ✅ |
 | `clean`/`smudge` round-trip through the real CLI with `padTo` set, `padded` flag correctly recorded | `src/cli.test.ts` | — | ✅ |
 | `encrypt`/`decrypt` round-trip via stdin and stdout | `src/cli.test.ts` | — | ✅ |
-| `encrypt`/`decrypt` produce the same bytes as the filters | `src/cli.test.ts` | — | 🔲 |
+| `encrypt`/`decrypt` produce the same bytes as the filters | `src/cli.test.ts` | — | ✅ |
 | No command prints key material at `--verbose` | `src/cli.test.ts` | — | ✅ |
 | A key object interpolated into a string yields `[redacted]` | `src/crypto.test.ts` | — | ✅ |
 | Error messages name the offending path | `src/cli.test.ts` | — | ✅ |
-| No error message contains plaintext bytes | `src/cli.test.ts` | `blobs/` | 🔲 |
+| No error message contains plaintext bytes | `src/cli.test.ts` | `blobs/` | ✅ |
 | `--repo` operates on the named repository, before or after the command, relative paths resolve against `cwd` | `src/cli.test.ts` | — | ✅ |
 | `--repo` with no path argument exits 4 | `src/cli.test.ts` | — | ✅ |
 | `--quiet` suppresses a success confirmation without changing the exit code or side effect | `src/cli.test.ts` | — | ✅ |

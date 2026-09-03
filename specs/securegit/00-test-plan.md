@@ -686,7 +686,45 @@ existing test broke. Cached the same way as `SECUREGIT_PASSPHRASE` in
 between two blobs, confirm the second still decrypts). Every row in spec
 07's precedence table is now implemented.
 
-662 unit tests, all green; 40 integration tests, all green. The package is
+The remaining small unit-test gaps and two items outside the original
+backlog plan are now closed too. `bindPath` changing doesn't silently
+break old blobs turned out to be structurally guaranteed, not just
+untested: `unseal()` has no `bindPath` parameter at all, so decrypt always
+uses each envelope's own recorded flag — a `src/filter.test.ts` test
+proves it directly (corrected from `keyring.test.ts`, which has no
+`bindPath` concept in the first place). A keyring resolving inside the
+repository's own working tree is now refused at `init` itself
+(`initConfig()`'s new optional `home` check, `src/config.ts`), defense in
+depth alongside `verify`'s existing equivalent check. `encrypt`/`decrypt`
+are proved byte-identical to `clean`/`smudge` given the same path and
+content, and three new `src/cli.test.ts` tests prove no error message —
+corrupted envelope, locked clean, missing-generation smudge warning —
+ever contains the plaintext that produced it.
+
+Outside the plan: "raised scrypt parameters re-wrap on next unlock"
+(06-key-provider-port.md) was a real unbuilt feature, not a missing test
+— `unlockKeyring()` never wrote anything back to disk. Built as a new,
+deliberately separate `rewrapOutdatedGenerations()` in `src/keyring.ts`,
+called only from `cmdUnlock`, never from `unlockKeyring()` itself (which
+stays a pure read — every filter-time unwrap, `SECUREGIT_PASSPHRASE`
+included, goes through it, and a filter must never write to disk).
+Best-effort: a re-wrap failure never fails the unlock that triggered it.
+T13's `filter-process` bounds-in-flight-bytes row already had a real
+mechanism behind it (`process.ts` checks a running byte total packet by
+packet, discarding accumulated content the moment it crosses `maxBytes`)
+but no test proving the check happens incrementally, across several real
+packets, rather than only against a single packet already too big on its
+own — the shape that actually matters for an adversary's oversized
+envelope arriving over the real protocol.
+
+Every row from the original backlog plan, and both items found outside
+it, are now closed — nothing 🔲 remains except the plan's explicitly
+deferred items (`key add-provider`/`remove-provider`/`list`/
+`list-recipients`, refusing removal of the last recipient,
+`padTo`/`bindPath` change-refusal, F13's concurrent-rotation race), each
+still deferred for the same stated reasons.
+
+679 unit tests, all green; 40 integration tests, all green. The package is
 TypeScript (`src/` → `dist/`, NodeNext, `strict` plus
 `noUncheckedIndexedAccess` and `exactOptionalPropertyTypes`), matching
 `@trinoris/decision-core`. Unit

@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { clean as filterClean, smudge as filterSmudge, type KeySource } from './filter.js';
-import { encodePacketList, splitContent, PktLineReader } from './pktline.js';
+import { encodePacketList, splitContent, PktLineReader, MAX_PACKET_PAYLOAD } from './pktline.js';
 import {
   FilterProcessServer,
   ProcessProtocolError,
@@ -294,6 +294,25 @@ describe('oversized content', () => {
     await h.server.push(commandRequest('clean', PATH, Buffer.from('small')));
     const lists = readAllLists(h.outBuf());
     expect(textOf(lists[0]!)).toEqual(['status=success']);
+  });
+
+  it('T13: bounds in-flight bytes — the running total crossing maxBytes is detected mid-stream, across several packets, not only against one already-oversized packet', async () => {
+    // Three real pkt-line-sized packets (splitContent()'s own chunk size),
+    // each individually under maxBytes on its own — the earlier "oversized"
+    // tests above all use a single packet already bigger than the whole
+    // limit, which proves the *outcome* but not that the check happens
+    // incrementally as content streams in. This is the shape that actually
+    // matters for T13 (11-filter-process.md): an adversary's oversized
+    // envelope arrives as many packets over the real protocol, not as one
+    // giant in-memory buffer already sitting there to inspect.
+    const maxBytes = 100_000;
+    const packet = Buffer.alloc(MAX_PACKET_PAYLOAD, 0x58); // ~64KiB, under maxBytes alone
+    const content = Buffer.concat([packet, packet, packet]); // ~192KiB — crosses maxBytes by packet 2
+    const h = await ready({ maxBytes });
+    await h.server.push(commandRequest('clean', PATH, content));
+    const lists = readAllLists(h.outBuf());
+    expect(lists).toHaveLength(1);
+    expect(textOf(lists[0]!)).toEqual(['status=error']);
   });
 });
 

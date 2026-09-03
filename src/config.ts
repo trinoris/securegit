@@ -7,7 +7,7 @@
 // See specs/securegit/02-git-integration.md and 05-key-hierarchy.md.
 
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, relative, isAbsolute, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 
 export class ConfigError extends Error {
@@ -51,9 +51,24 @@ async function isGitRepo(repoDir: string): Promise<boolean> {
   }
 }
 
+/** True when `child` is `parent` itself or nested under it. */
+function isInside(child: string, parent: string): boolean {
+  const rel = relative(parent, child);
+  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+}
+
 export interface InitConfigOptions {
   bindPath?: boolean;
   padTo?: number;
+  /**
+   * When given, refuses (rather than silently allowing) a repository whose
+   * keyring would resolve inside its own working tree — 05-key-hierarchy.md:
+   * nothing unwrapped ever belongs in the repo, and a keyring nested inside
+   * it is one `git add -A` away from being committed. Optional so existing
+   * callers that don't pass `home` at all (most of `src/config.test.ts`)
+   * keep working unchanged; `cli.ts`'s `cmdInit` always passes it.
+   */
+  home?: string;
 }
 
 export async function initConfig(
@@ -69,6 +84,14 @@ export async function initConfig(
   const padTo = opts.padTo ?? 0;
   if (!Number.isInteger(padTo) || padTo < 0) {
     throw new ConfigError(`securegit: padTo must be a non-negative integer, got ${padTo}`);
+  }
+
+  if (opts.home !== undefined && isInside(resolve(opts.home, '.securegit'), resolve(repoDir))) {
+    throw new ConfigError(
+      `securegit: refusing to initialise — the keyring at ${resolve(opts.home, '.securegit')} ` +
+        `would live inside this repository's own working tree (${resolve(repoDir)})\n` +
+        `  action: set HOME to a location outside the repository`,
+    );
   }
 
   const path = configPath(repoDir);

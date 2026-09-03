@@ -1,5 +1,5 @@
 import { type Secret } from './crypto.js';
-import type { KeyProvider, ProviderState, WrappedKey } from './provider.js';
+import { type KeyProvider, type ProviderState, type WrappedKey } from './provider.js';
 import type { KeySource } from './filter.js';
 export declare class KeyringError extends Error {
     readonly code = "KEYRING";
@@ -76,6 +76,27 @@ export interface UnlockOptions {
  * here: the next slot, or the next generation, may still succeed.
  */
 export declare function unlockKeyring(file: KeyringFile, providers: KeyProvider[], opts?: UnlockOptions): Promise<KeySource>;
+/**
+ * "Parameters are stored in the keyring so they can be raised later without
+ * breaking existing keyrings; a keyring wrapped at 2^16 is re-wrapped at
+ * the new cost on the next successful unlock" (06-key-provider-port.md).
+ * Deliberately separate from `unlockKeyring()` itself, which stays a pure
+ * read — every filter-time unwrap (`loadKeys()`'s `SECUREGIT_PASSPHRASE`
+ * source included) goes through that same function, and a filter must
+ * never write to disk. Only `cmdUnlock`, the one place a real `unlock`
+ * happens, calls this, and only after a successful unlock already produced
+ * `keys`.
+ *
+ * Only `passphrase-file` has a cost to raise (`state.N`); slots from any
+ * other provider are left untouched — there's nothing generic about "raise
+ * the cost" across providers yet, and only one provider exists to prove it
+ * against. A generation this unlock didn't actually hold (`keys.find()`
+ * returns `null`) is left as-is too — there is no RMK on hand to re-wrap.
+ */
+export declare function rewrapOutdatedGenerations(file: KeyringFile, providers: KeyProvider[], keys: KeySource): Promise<{
+    file: KeyringFile;
+    changed: boolean;
+}>;
 /**
  * Writes the keyring atomically (temp file + rename, so a crash mid-write
  * cannot leave a half-written file) with mode 0600, creating parent

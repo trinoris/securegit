@@ -6,12 +6,18 @@ The threat model in [01](01-threat-model.md) names the adversaries. This spec
 works through what they actually do, in order of how likely it is to happen to
 somebody using this tool in 2026.
 
-**Status: MOSTLY IMPLEMENTED for the v1-marked mitigations.** T3, T5, T10
-and T12 are done and tested; T1's `verify` detector and T7/T8's
-key-material hardening were already built as part of earlier specs and are
-cross-checked here. T13's `filter-process` bounds-in-flight-bytes row has
-no dedicated test yet, though `filter-process` itself is built (spec 11).
-See the Test Cases table.
+**Status: IMPLEMENTED for the v1-marked mitigations.** T3, T5, T10, T12 and
+T13 are done and tested; T1's `verify` detector and T7/T8's key-material
+hardening were already built as part of earlier specs and are
+cross-checked here. T13's `filter-process` bounds-in-flight-bytes row is
+proved in `src/process.test.ts` by a content stream split across several
+real pkt-line-sized packets whose *running total* crosses `maxBytes`
+partway through — the existing single-oversized-packet tests already
+proved the outcome (a rejected blob), but not that the check happens
+incrementally as content streams in rather than only once a whole,
+already-too-big buffer is sitting there to inspect, which is the shape
+that actually matters for an adversary's oversized envelope arriving over
+the real protocol.
 
 ## The thesis
 
@@ -248,7 +254,7 @@ requests ([11](11-filter-process.md)).
 | T12: `verify` does not flag a residue-shaped file that is itself tracked | `src/verify.test.ts` | — | ✅ |
 | T12: merge driver leaves no temporary file behind, including on error | `src/merge.test.ts` | — | ✅ |
 | T13: oversized envelope is refused before allocation | `src/envelope.test.ts` | — | ✅ |
-| T13: `filter-process` bounds in-flight bytes | `src/process.test.ts` | — | 🔲 |
+| T13: `filter-process` bounds in-flight bytes | `src/process.test.ts` | — | ✅ |
 | All non-AEAD comparisons use `timingSafeEqual` | `src/package.test.ts` | — | ✅ |
 
 ## Relationship to Other Specs

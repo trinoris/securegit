@@ -9,6 +9,8 @@ import { looksLikeEnvelope, parseEnvelope } from './envelope.js';
 import { runCli, runFilterProcess, type CliIO, type FilterProcessIO } from './cli.js';
 import { resolveSessionPath } from './session.js';
 import { resolveKeyringPath } from './config.js';
+import { createKeyring, writeKeyringFile } from './keyring.js';
+import { PassphraseFileProvider, DEFAULT_SCRYPT_N } from './provider.js';
 import { encodePacketList, splitContent, PktLineReader } from './pktline.js';
 
 const execFile = promisify(execFileCb);
@@ -271,6 +273,37 @@ describe('unlock / lock / status', () => {
     await h.run(['init']);
     expect(await h.run(['unlock'])).toBe(0);
     expect(await h.run(['status'])).toBe(0);
+  });
+
+  it('re-wraps a keyring wrapped at an old scrypt cost on the next successful unlock', async () => {
+    const h = harness();
+    await h.run(['init']);
+    const config = JSON.parse(
+      await readFile(join(dir, '.securegit', 'config.json'), 'utf8'),
+    ) as { repoId: string };
+    const keyringPath = resolveKeyringPath(config.repoId, home);
+
+    // Overwrite init's own (already-current-cost) keyring with a hand-built
+    // one at an old, low cost — same repoId, same passphrase.
+    const oldProvider = new PassphraseFileProvider(
+      () => 'correct horse battery staple',
+      { N: 2 ** 10, r: 8, p: 1 },
+    );
+    const { file: oldFile } = await createKeyring(config.repoId, [oldProvider]);
+    expect(oldFile.generations[0]!.wrapped[0]!.state.N).toBe(2 ** 10);
+    await writeKeyringFile(keyringPath, oldFile);
+
+    expect(await h.run(['unlock'])).toBe(0);
+    expect(h.infoText()).toContain('re-wrapped');
+
+    const after = JSON.parse(await readFile(keyringPath, 'utf8')) as {
+      generations: { wrapped: { state: { N: number } }[] }[];
+    };
+    expect(after.generations[0]!.wrapped[0]!.state.N).toBe(DEFAULT_SCRYPT_N);
+
+    // Still usable: lock, then unlock again with the same passphrase.
+    await h.run(['lock']);
+    expect(await h.run(['unlock'])).toBe(0);
   });
 
   it('unlock exits 1 with the wrong passphrase', async () => {
@@ -1919,6 +1952,7 @@ describe('textconv', () => {
 
 describe('encrypt / decrypt / inspect', () => {
   const PT = Buffer.from('hello from the ad-hoc path\n');
+  const PATH = 'config/production.json';
 
   it('encrypt then decrypt round-trips via stdin/stdout', async () => {
     const h = harness();
@@ -1938,6 +1972,42 @@ describe('encrypt / decrypt / inspect', () => {
     const h = harness();
     await h.run(['init']); // never unlocked
     expect(await h.run(['encrypt', '-'], { stdin: PT, env: {} })).toBe(1);
+  });
+
+  it('encrypt produces the same bytes as clean, byte for byte, given the same path and content', async () => {
+    const h = harness();
+    await h.run(['init', '--bind-path']); // so the path genuinely enters the derivation
+    await h.run(['unlock']);
+
+    const filePath = join(dir, 'plain.json');
+    const content = Buffer.from('{"a":1}\n');
+    await writeFile(filePath, content);
+
+    expect(await h.run(['encrypt', filePath, '--out', '-'])).toBe(0);
+    const viaEncrypt = h.stdoutBuf();
+
+    expect(await h.run(['clean', '--', filePath], { stdin: content })).toBe(0);
+    const viaClean = h.stdoutBuf();
+
+    expect(viaEncrypt.equals(viaClean)).toBe(true);
+  });
+
+  it('decrypt produces the same bytes as smudge, byte for byte', async () => {
+    const h = harness();
+    await h.run(['init']);
+    await h.run(['unlock']);
+    const content = Buffer.from('{"a":1}\n');
+
+    expect(await h.run(['clean', '--', PATH], { stdin: content })).toBe(0);
+    const ciphertext = h.stdoutBuf();
+
+    expect(await h.run(['smudge', '--', PATH], { stdin: ciphertext })).toBe(0);
+    const viaSmudge = h.stdoutBuf();
+
+    expect(await h.run(['decrypt', '-'], { stdin: ciphertext })).toBe(0);
+    const viaDecrypt = h.stdoutBuf();
+
+    expect(viaDecrypt.equals(viaSmudge)).toBe(true);
   });
 
   it('decrypt exits 1 for a generation this keyring does not hold', async () => {
@@ -1996,6 +2066,61 @@ describe('encrypt / decrypt / inspect', () => {
     expect(parsed.padded).toBe(false);
     expect(typeof parsed.keyId).toBe('string');
     expect(typeof parsed.ciphertextLength).toBe('number');
+  });
+});
+
+describe('no error message contains plaintext bytes', () => {
+  const PATH = 'config/production.json';
+  const SECRET_MARKER = 'sk-supersecretvalue-should-never-leak';
+  const SECRET = Buffer.from(`{"apiKey":"${SECRET_MARKER}"}\n`);
+
+  it("a corrupted envelope's error messages never contain the plaintext that produced it", async () => {
+    const h = harness();
+    await h.run(['init']);
+    await h.run(['unlock']);
+    expect(await h.run(['clean', '--', PATH], { stdin: SECRET })).toBe(0);
+    const ciphertext = h.stdoutBuf();
+
+    // Flip the very last byte — well past the header, into the ciphertext
+    // itself — to trigger an authentication failure, not a format error.
+    const corrupted = Buffer.from(ciphertext);
+    corrupted[corrupted.length - 1]! ^= 0xff;
+
+    expect(await h.run(['smudge', '--strict', '--', PATH], { stdin: corrupted })).toBe(3);
+    expect(h.stderrText()).not.toContain(SECRET_MARKER);
+
+    expect(await h.run(['decrypt', '-'], { stdin: corrupted })).toBe(3);
+    expect(h.stderrText()).not.toContain(SECRET_MARKER);
+  });
+
+  it("a locked clean's error message never contains the plaintext it refused to encrypt", async () => {
+    const h = harness();
+    await h.run(['init']); // never unlocked
+    expect(await h.run(['clean', '--', PATH], { stdin: SECRET, env: {} })).toBe(1);
+    expect(h.stderrText()).not.toContain(SECRET_MARKER);
+  });
+
+  it('a missing-generation smudge warning never contains the plaintext, only path and generation', async () => {
+    const a = harness();
+    await a.run(['init']);
+    await a.run(['unlock']);
+    expect(await a.run(['clean', '--', PATH], { stdin: SECRET })).toBe(0);
+    const ciphertext = a.stdoutBuf();
+
+    // A genuinely different repository — its keyring holds a generation
+    // this ciphertext was never wrapped for.
+    const otherDir = await mkdtemp(join(tmpdir(), 'securegit-cli-repo-'));
+    await mkdir(join(otherDir, '.git'));
+    try {
+      const b = harness({ cwd: otherDir });
+      await b.run(['init']);
+      await b.run(['unlock']);
+      // No --strict: this is the warned-passthrough path, not a hard failure.
+      expect(await b.run(['smudge', '--', PATH], { stdin: ciphertext })).toBe(0);
+      expect(b.stderrText()).not.toContain(SECRET_MARKER);
+    } finally {
+      await rm(otherDir, { recursive: true, force: true });
+    }
   });
 });
 

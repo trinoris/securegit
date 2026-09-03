@@ -15,7 +15,7 @@ import { randomBytes } from 'node:crypto';
 import { keyFingerprint } from './crypto.js';
 import { ConfigError, initConfig, readConfig, resolveKeyringPath } from './config.js';
 import { InstallError, install, protect, unprotect } from './install.js';
-import { KeyringError, createKeyring, keyringFromRecoveredGenerations, parseKeyId, readKeyringFile, rotateKeyring, unlockKeyring, writeKeyringFile, } from './keyring.js';
+import { KeyringError, createKeyring, keyringFromRecoveredGenerations, parseKeyId, readKeyringFile, rewrapOutdatedGenerations, rotateKeyring, unlockKeyring, writeKeyringFile, } from './keyring.js';
 import { PassphraseFileProvider, ProviderError } from './provider.js';
 import { keySourceFromSessionKey, lockSession, lockedKeySource, readSession, resolveSessionPath, writeSession, } from './session.js';
 import { LockedError, clean, smudge, textconv } from './filter.js';
@@ -185,7 +185,7 @@ async function cmdInit(args, io) {
     }
     let config;
     try {
-        config = await initConfig(io.cwd, { bindPath, ...(padTo !== undefined ? { padTo } : {}) });
+        config = await initConfig(io.cwd, { bindPath, home: io.home, ...(padTo !== undefined ? { padTo } : {}) });
     }
     catch (e) {
         io.stderr(e.message);
@@ -368,6 +368,19 @@ async function cmdUnlock(args, io) {
     if (current === null) {
         io.stderr("securegit: could not unlock — wrong passphrase, or this keyring holds none of the repository's generations");
         return EXIT_LOCKED;
+    }
+    // 06-key-provider-port.md: a keyring wrapped at an old scrypt cost is
+    // re-wrapped at the current one on the next successful unlock. Never
+    // blocks the unlock itself — this is hygiene, not a precondition for it.
+    try {
+        const { file: rewrapped, changed } = await rewrapOutdatedGenerations(file, [provider], keys);
+        if (changed) {
+            await writeKeyringFile(keyringPath, rewrapped);
+            io.info('securegit: keyring re-wrapped at the current scrypt cost');
+        }
+    }
+    catch {
+        // best-effort — a re-wrap failure here must not fail the unlock
     }
     const code = await writeUnlockSession(config, io, keys, args);
     io.info(`securegit: unlocked (generation ${current.keyId})`);

@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, rm, chmod, readdir, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { isSecret, keyFingerprint } from './crypto.js';
-import { PassphraseFileProvider, type KeyProvider } from './provider.js';
+import { PassphraseFileProvider, DEFAULT_SCRYPT_N, type KeyProvider } from './provider.js';
 import { clean, smudge, LockedError } from './filter.js';
 import {
   KeyringError,
@@ -13,6 +13,7 @@ import {
   rotateKeyring,
   keyringFromRecoveredGenerations,
   unlockKeyring,
+  rewrapOutdatedGenerations,
   writeKeyringFile,
   readKeyringFile,
   type KeyringFile,
@@ -354,6 +355,89 @@ describe('unlockKeyring()', () => {
     const { file, rmk } = await createKeyring(REPO, [passphraseProvider()]);
     const keys = await unlockKeyring(file, [passphraseProvider()]);
     expect(keys.current()?.rmk.equals(rmk)).toBe(true);
+  });
+});
+
+// 06-key-provider-port.md: "a keyring wrapped at 2^16 is re-wrapped at the
+// new cost on the next successful unlock." Every fixture in this file uses
+// FAST_COST for speed, which is exactly what makes it a stand-in for "an
+// old, low cost" here — DEFAULT_SCRYPT_N (the real provider's own default)
+// is always strictly higher.
+describe('rewrapOutdatedGenerations()', () => {
+  it('re-wraps a slot whose stored cost is below the current default', async () => {
+    const oldProvider = passphraseProvider(); // FAST_COST
+    const { file } = await createKeyring(REPO, [oldProvider]);
+    const before = file.generations[0]!.wrapped[0]!;
+    expect(before.state.N).toBe(FAST_COST.N);
+
+    const keys = await unlockKeyring(file, [oldProvider]);
+    const currentCostProvider = new PassphraseFileProvider(() => PASSPHRASE); // real DEFAULT_SCRYPT_N
+    const { file: rewrapped, changed } = await rewrapOutdatedGenerations(
+      file,
+      [currentCostProvider],
+      keys,
+    );
+
+    expect(changed).toBe(true);
+    const after = rewrapped.generations[0]!.wrapped[0]!;
+    expect(after.state.N).toBe(DEFAULT_SCRYPT_N);
+    // A fresh salt, not the old one reused under a new cost label.
+    expect(after.state.salt).not.toBe(before.state.salt);
+  });
+
+  it('the re-wrapped slot still unlocks to the exact same RMK', async () => {
+    const oldProvider = passphraseProvider();
+    const { file, rmk } = await createKeyring(REPO, [oldProvider]);
+    const keys = await unlockKeyring(file, [oldProvider]);
+
+    const currentCostProvider = new PassphraseFileProvider(() => PASSPHRASE);
+    const { file: rewrapped } = await rewrapOutdatedGenerations(file, [currentCostProvider], keys);
+
+    const reunlocked = await unlockKeyring(rewrapped, [currentCostProvider]);
+    expect(reunlocked.current()?.rmk.equals(rmk)).toBe(true);
+  });
+
+  it('leaves a slot already at or above the current default untouched', async () => {
+    const currentCostProvider = new PassphraseFileProvider(() => PASSPHRASE); // DEFAULT_SCRYPT_N already
+    const { file } = await createKeyring(REPO, [currentCostProvider]);
+    const before = file.generations[0]!.wrapped[0]!;
+
+    const keys = await unlockKeyring(file, [currentCostProvider]);
+    const { file: result, changed } = await rewrapOutdatedGenerations(file, [currentCostProvider], keys);
+
+    expect(changed).toBe(false);
+    expect(result.generations[0]!.wrapped[0]).toEqual(before);
+  });
+
+  it('leaves a generation this unlock did not actually hold untouched', async () => {
+    const oldProvider = passphraseProvider();
+    const { file } = await createKeyring(REPO, [oldProvider]);
+    const before = file.generations[0]!.wrapped[0]!;
+
+    // A KeySource that holds nothing at all — as if this generation's slot
+    // failed to unwrap for some other provider-specific reason.
+    const emptyKeys = { current: () => null, find: () => null, available: () => [] };
+    const { file: result, changed } = await rewrapOutdatedGenerations(file, [oldProvider], emptyKeys);
+
+    expect(changed).toBe(false);
+    expect(result.generations[0]!.wrapped[0]).toEqual(before);
+  });
+
+  it('leaves a non-passphrase-file provider slot untouched, whatever its state', async () => {
+    const oldProvider = passphraseProvider();
+    const { file } = await createKeyring(REPO, [oldProvider]);
+    // Simulate a slot from some other provider — nothing to compare its
+    // state.N against, and nothing this function knows how to re-wrap.
+    const foreignSlot = { provider: 'some-other-provider', state: { N: 1 }, payload: {} };
+    const mixed: KeyringFile = {
+      ...file,
+      generations: [{ ...file.generations[0]!, wrapped: [foreignSlot] }],
+    };
+    const keys = await unlockKeyring(file, [oldProvider]); // unlocks via the original, unmixed file
+
+    const { file: result, changed } = await rewrapOutdatedGenerations(mixed, [oldProvider], keys);
+    expect(changed).toBe(false);
+    expect(result.generations[0]!.wrapped[0]).toEqual(foreignSlot);
   });
 });
 
