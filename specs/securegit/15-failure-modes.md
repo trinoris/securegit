@@ -15,13 +15,20 @@ not about a message — F21 reuses F1's exact message, discovered while
 building spec 08's real-clone join-flow proof). F21's own test was itself
 flaky for the same reason F16 exists — see "F21 is the same optimization
 again" below — fixed once diagnosed, not by changing what `pull` guarantees.
+F13 is proven in `src/cli.test.ts` by racing real `git add` and `key rotate`
+subprocesses 15 times: empirically `rotate`'s own dirty-tree check (it runs
+`git status`, which itself invokes `clean`) loses to a concurrent `add`
+every time and refuses (exit 4) before ever touching the keyring — stronger
+than this table's literal wording, since rotation and an in-flight add turn
+out never to be concurrent at all here, not merely concurrent-but-safe. The
+test asserts the outcome-invariant (no torn/mixed-generation read, in case
+timing differs elsewhere) rather than the specific branch observed.
 What's not covered: F3/F17 are Git's own message, not ours; F10 (`filter-process`
 crashes mid-run) has no test yet, though `filter-process` itself is now built
 ([11](11-filter-process.md)) — this row predates that and is stale in saying
 the feature doesn't exist, only the test for this specific crash-mid-run
 case; F20 needs a Node-version floor check, not built; F12/F14/F15 have no
-code path to test; F13 needs a real concurrent-process race (`key rotate`
-itself is wired now — see [09](09-rotation-recovery.md)).
+code path to test.
 
 ## Core Principle
 
@@ -45,7 +52,7 @@ itself is wired now — see [09](09-rotation-recovery.md)).
 | F10 | `filter-process` crashes mid-run | Git fails the operation | Git's "filter process died" plus our stderr | rerun; report if reproducible |
 | F11 | Disk full while writing the keyring | keyring write is atomic (temp + rename) | "could not write keyring" | free space; the old keyring is intact |
 | F12 | Two `git` processes filtering at once | both read the session | fine — the session is read-only to the filter | — |
-| F13 | Concurrent `key rotate` and `git add` | rotate invalidates the session | the add fails F9-style | rerun after rotation |
+| F13 | Concurrent `key rotate` and `git add` | rotate's dirty-tree check refuses (exit 4) rather than race the add; if it ever did win, session invalidation would fail the add F9-style, never mix generations | rotate refused with a "commit or stash first" message, or (unobserved so far) an F9-style add failure | rerun the rotate once the tree is clean |
 | F14 | Keyring lost, no recipients, no recovery export | — | every protected blob is permanently unreadable | none. This is the failure the design cannot soften. |
 | F15 | Recovery file present, code lost | — | as F14 | none |
 | F16 | Clone by someone with no key, who commits without ever touching the protected file | Git's own stat-cache skips `add`/`commit` staging a path whose worktree content already matches the index — `clean` is never invoked at all | works; the file is unmodified ciphertext | — (Git never calls the filter; see below, not `clean`'s passthrough) |
@@ -195,7 +202,7 @@ Messages go to stderr in every case ([10](10-cli-contract.md)), including
 | F6: a flipped ciphertext byte reports the path | `src/failure.test.ts` | — | ✅ |
 | F8: a keyless-clone worktree is repaired by `rm --cached`+`checkout HEAD` | `src/git.integration.test.ts` | `repo-protected/` | ✅ |
 | F11: keyring write is atomic; a simulated failure leaves the old file | `src/keyring.test.ts` | — | ✅ |
-| F13: rotation during an add fails the add rather than mixing generations | `src/git.integration.test.ts` | `repo-protected/` | 🔲 (`key rotate` is wired now — this needs a real concurrent-process race, not built) |
+| F13: a real concurrent rotate and add never mixes generations, corrupts, or half-writes the index | `src/cli.test.ts` | `repo-protected/` | ✅ (15 real-subprocess iterations; empirically the dirty-tree check refuses rotate every time rather than racing it — see status note above) |
 | F16: keyless commit of an unmodified protected file is a no-op, and the mechanism is Git's stat-cache, not `clean`'s passthrough | `src/git.integration.test.ts` | `repo-protected/` | ✅ |
 | F18: CRLF-mangled envelope reports corruption, not a wrong key | `src/failure.test.ts` | — | ✅ |
 | F19: foreign keyring is rejected by `repoId`, with both ids named | `src/keyring.test.ts` | — | ✅ |

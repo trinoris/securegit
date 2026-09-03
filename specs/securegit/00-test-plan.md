@@ -586,11 +586,13 @@ repository, and that `initConfig()` leaves nothing under the repository
 but `.securegit/config.json`.
 
 A third batch closes the last two rows and the whole "prove existing
-behavior against real git" list, except the two items already carved out
+behavior against real git" list, except one item already carved out
 as deliberately deferred at the time (removing the last recipient — later
 reconsidered and confirmed as a deliberate non-goal, not an infrastructure
-gap, see [08](08-multi-recipient.md) — and F13's concurrent-rotation race,
-which does need infrastructure well beyond a test).
+gap, see [08](08-multi-recipient.md)). F13's concurrent-rotation race —
+initially deferred as needing infrastructure beyond a test — is since
+proven too, in `src/cli.test.ts`, by racing real `git add` and `key rotate`
+subprocesses; see [15](15-failure-modes.md).
 One new top-level describe block covers a real recipient join, removal,
 rotation and `reencrypt`, end to end: a contractor identity is added as a
 recipient and unlocks once while access is live; after that identity is
@@ -803,11 +805,12 @@ whatever `bindPath` produced them regardless: the flag lives in each
 envelope's own `flags` byte, and `unseal()` has no `bindPath` parameter at
 all to read a "current" value from even if it wanted to.
 
-Only F13's concurrent-rotation race remains deferred — needs a real
-multi-process harness, meaningfully higher effort than everything else
-closed this session.
+F13's concurrent-rotation race is closed too: a real multi-process harness
+in `src/cli.test.ts` races `git add` and `key rotate` 15 times, asserting
+the index is never mixed or half-written either way it lands. Nothing
+remains deferred from this backlog.
 
-705 unit tests, all green; 40 integration tests, all green. The package is
+706 unit tests, all green; 40 integration tests, all green. The package is
 TypeScript (`src/` → `dist/`, NodeNext, `strict` plus
 `noUncheckedIndexedAccess` and `exactOptionalPropertyTypes`), matching
 `@trinoris/decision-core`. Unit

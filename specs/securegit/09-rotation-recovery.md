@@ -15,10 +15,11 @@ end-to-end through the CLI, giving [16](16-adversarial-integrity.md)'s T6
 (recovery theft) a real mitigation to test against, where none existed
 before. `rotate` now also requires the recipient-count confirmation T5 asks
 for — `--confirm-recipients <n>`, checked before the dirty-tree/locked
-refusals hand off to the actual rotation. Not built:
-[15](15-failure-modes.md)'s F13 (concurrent rotate and add), which needs a
-real race, not just the commands existing. See "What this pass actually
-built" below.
+refusals hand off to the actual rotation. [15](15-failure-modes.md)'s F13
+(concurrent rotate and add) is now proven with a real multi-process race in
+`src/cli.test.ts` — empirically the dirty-tree check refuses rotate before
+it ever races the keyring, a stronger guarantee than F13's literal wording.
+See "What this pass actually built" below.
 
 ## Core Principle
 

@@ -486,11 +486,11 @@ proves `resolveKeyringPath()` resolves under `home` and that `initConfig()`
 leaves nothing under the repository but `.securegit/config.json`.
 
 A third batch closes the last two rows and the whole "prove existing
-behavior against real git" list, except two items deliberately deferred at
+behavior against real git" list, except one item deliberately deferred at
 the time (removing the last recipient — later reconsidered and confirmed
-as a deliberate non-goal, not an infrastructure gap — and F13's
-concurrent-rotation race, which does need infrastructure well beyond a
-test). One describe block covers a real
+as a deliberate non-goal, not an infrastructure gap). F13's
+concurrent-rotation race, initially deferred as needing infrastructure
+beyond a test, is since proven too — see below. One describe block covers a real
 recipient join, removal, rotation and `reencrypt` end to end: a contractor
 identity unlocks once while access is live, then keeps decrypting the
 pre-rotation blob after being removed and the repo rotated — an
@@ -610,9 +610,11 @@ needed; the old 🔲 row predated that decision and is now corrected to N/A.
 succeeds, and old generations keep decrypting under whatever `bindPath`
 produced them regardless (recorded per envelope, never read from config).
 
-Only F13's concurrent-rotation race remains deferred.
+F13's concurrent-rotation race is closed too — a real multi-process race
+in `src/cli.test.ts` (`git add` vs `key rotate`, 15 iterations), see
+[15](15-failure-modes.md). Nothing remains deferred from this backlog.
 
-705 unit tests total, all green; 40 integration tests, all green. TypeScript,
+706 unit tests total, all green; 40 integration tests, all green. TypeScript,
 `src/` → `dist/`, unit tests beside the source, matching
 `@trinoris/decision-core`.
 

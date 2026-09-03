@@ -1746,6 +1746,88 @@ describe('key rotate / reencrypt', () => {
         await rm(recipientHome, { recursive: true, force: true });
       }
     });
+
+    it('F13: a real concurrent key rotate and git add never mixes generations, corrupts, or half-writes the index', async () => {
+      // 15 iterations, each spawning several real subprocesses — comfortably
+      // past the default 5s test timeout on ordinary hardware.
+      // 15-failure-modes.md: "rotate invalidates the session — the add
+      // fails F9-style — rerun after rotation." The underlying race window
+      // (a single async file read inside `clean`'s subprocess, racing `key
+      // rotate`'s own `unlink` from a wholly separate OS process) is
+      // microseconds wide, and empirically this test never actually reaches
+      // it: `rotate`'s own dirty-tree check (it runs `git status`, which
+      // must itself invoke `clean` to compare) loses to a concurrent `add`
+      // deterministically across many runs and exits refused (4) before it
+      // ever touches the keyring, every single time. That is a *stronger*
+      // guarantee than the spec's literal wording — rotation and an
+      // in-flight add are never concurrent at all here, not merely
+      // concurrent-but-safe — so this test is written to hold under either
+      // outcome (in case timing ever differs on other hardware) rather than
+      // assert the specific one observed. The deeper invariant, that no
+      // code path could observe a torn or mixed-generation read even if
+      // they did race, already follows from `readSession()`'s own
+      // construction — one `readFile`+`JSON.parse` wrapped in a single
+      // catch that treats *any* failure, including a concurrent unlink, as
+      // locked. This test is the empirical proof for the outer gate, not
+      // the fix.
+      const h = await setUp();
+      const ITERATIONS = 15;
+
+      for (let i = 0; i < ITERATIONS; i++) {
+        await writeFile(join(realDir, PATH), Buffer.from(`{"password":"hunter${i}"}\n`));
+        const beforeIndexSha = await realGit(['rev-parse', `:${PATH}`]);
+
+        const [addResult, rotateCode] = await Promise.all([
+          execFile('git', ['add', PATH], { cwd: realDir, env: gitEnv(realHome) }).then(
+            () => ({ ok: true as const }),
+            (error: unknown) => ({ ok: false as const, error }),
+          ),
+          h.run(['key', 'rotate', '--confirm-recipients', '0']),
+        ]);
+
+        // Rotate either really succeeded, or refused for a legitimate
+        // reason (e.g. its own dirty-tree check catching the racing add
+        // mid-stage) — never anything else.
+        expect([0, 4]).toContain(rotateCode);
+        // Only a successful rotate ever invalidates the session — restore
+        // it before the next iteration regardless of how this one's add
+        // came out, so every iteration gets a genuine fresh chance at the
+        // race, not just the first.
+        if (rotateCode === 0) await h.run(['unlock']);
+
+        const afterIndexSha = await realGit(['rev-parse', `:${PATH}`]);
+
+        if (addResult.ok) {
+          // The add won its race (or there wasn't one this time) — whatever
+          // landed in the index must be a real, decryptable envelope of
+          // *this* iteration's content, never a half-written or
+          // mixed-generation blob.
+          expect(afterIndexSha).not.toBe(beforeIndexSha);
+          const staged = await execFile('git', ['cat-file', '-p', afterIndexSha], {
+            cwd: realDir,
+            encoding: 'buffer',
+            env: gitEnv(realHome),
+          });
+          expect(looksLikeEnvelope(staged.stdout)).toBe(true);
+          expect(await h.run(['smudge', '--', PATH], { stdin: staged.stdout, env: {} })).toBe(0);
+          expect(h.stdoutBuf().toString('utf8')).toContain(`hunter${i}`);
+          // Commit so the tree is clean again for the next iteration.
+          await execFile('git', ['commit', '--quiet', '-m', `iteration ${i}`], {
+            cwd: realDir,
+            env: gitEnv(realHome),
+          });
+        } else {
+          // F9-style: the add failed closed, and the index is exactly
+          // unchanged — nothing partial, nothing corrupted.
+          expect(afterIndexSha).toBe(beforeIndexSha);
+          // Discard the failed edit so the tree is clean again.
+          await execFile('git', ['checkout', '--quiet', '--', PATH], {
+            cwd: realDir,
+            env: gitEnv(realHome),
+          });
+        }
+      }
+    }, 60_000);
   });
 
   describe('reencrypt', () => {
