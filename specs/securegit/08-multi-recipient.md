@@ -329,13 +329,28 @@ add-recipient`/`remove-recipient`, and a second path inside `unlock`.
   gone — to a committed `.securegit/removed-recipients.json`, mirroring
   `recovery.ts`'s recovery log in shape. Never the still-wrapped keys, which
   cease to exist once the file itself is deleted.
-- **`key remove-recipient` does not yet refuse removing the last
-  recipient.** The spec's warning about that case assumes recipients can be
-  the *only* access path to a repository — true once hardware-only,
-  recipient-only setups exist, but v1's primary access path is always the
-  local passphrase-wrapped keyring; a recipient is supplementary sharing on
-  top of it, not a replacement for it. Revisit this once that assumption
-  changes.
+- **`key remove-recipient` does not refuse removing the last recipient, on
+  purpose, reconsidered and confirmed rather than left as an unexamined
+  default.** The case for building a hard refusal was revisited directly:
+  would it actually protect anyone? Removing a recipient never touches the
+  local keyring, so whoever runs `remove-recipient` almost always still has
+  their own passphrase access afterward regardless of how many recipients
+  remain — a hard refusal wouldn't be protecting *them*. And the real risk
+  a check like this would exist to catch — losing all access to the
+  repository — is already caught, more precisely, by the single-point-of-
+  failure advisory `verify`/`status` already carry (exactly one holder of
+  the current generation, no recovery export on record): that's keyed on
+  *holders*, not recipient count, and stays a warning rather than a block,
+  because "you're now the only one with access" is not, by itself, a
+  mistake — plenty of solo or small-team repositories have zero recipients
+  at all. A hard refusal here would block a legitimate, ordinary operation
+  (revoking a departing contractor who happened to be the last recipient
+  on record) to guard against a risk it's the wrong proxy for. v1's
+  primary access path is always the local passphrase-wrapped keyring; a
+  recipient is supplementary sharing on top of it, not a replacement for
+  it — that assumption was the original reason this was deferred, and it
+  turned out to be the right one, not just a placeholder pending
+  hardware-only recipient setups.
 - **Two end-to-end proofs, not one.** `src/cli.test.ts` drives two `CliIO`
   instances — two different `home`s (so two different identities, keyrings
   and sessions) — against one shared `dir`, which faithfully models "the
@@ -396,7 +411,7 @@ add-recipient`/`remove-recipient`, and a second path inside `unlock`.
 | Removed recipient can still read pre-rotation blobs | `src/git.integration.test.ts` | `identities/` | ✅ |
 | Removed recipient cannot read post-rotation blobs | `src/git.integration.test.ts` | `identities/` | ✅ |
 | Recipient files are never filtered | `src/install.test.ts` | — | ✅ |
-| Removing the last recipient is refused | `src/recipients.test.ts` | — | 🔲 |
+| Removing the last recipient is refused | `src/recipients.test.ts` | — | N/A — deliberately not built; see "What this pass actually built" above for why a hard refusal was reconsidered and rejected, not just deferred |
 
 ## Relationship to Other Specs
 

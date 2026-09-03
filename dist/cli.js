@@ -665,9 +665,22 @@ async function cmdKeyRotate(args, io) {
         // not whatever HOME the calling process happens to have. In the real
         // binary these already coincide (`io.env` is `process.env`); explicit
         // here mainly for tests that inject a different `home`.
+        //
+        // `git status`'s dirty-check has to actually run our `clean` filter, as
+        // a real nested subprocess, to compare the worktree's plaintext against
+        // the staged ciphertext — so whatever env this spawn gets, that filter
+        // sees too. `SECUREGIT_SESSION_KEY`/`SECUREGIT_PASSPHRASE`/
+        // `SECUREGIT_IDENTITY_FILE` authenticate *this* `runCli()` invocation
+        // (07-unlock-session.md); they were never meant to cascade into a
+        // subprocess this invocation merely spawns, which already has its own
+        // valid session to read from `unlock` moments earlier. Left in, they'd
+        // make every dirty-check pay a real scrypt cost it has no reason to pay
+        // — slow enough, nested inside a real subprocess, to destabilize CI
+        // under load, not just wasteful locally.
+        const { SECUREGIT_SESSION_KEY: _sk, SECUREGIT_PASSPHRASE: _pp, SECUREGIT_IDENTITY_FILE: _idf, ...rest } = io.env;
         const { stdout } = await execFile('git', ['status', '--porcelain'], {
             cwd: io.cwd,
-            env: { ...io.env, HOME: io.home },
+            env: { ...rest, HOME: io.home },
         });
         statusOutput = stdout;
     }

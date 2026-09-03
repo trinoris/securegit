@@ -213,6 +213,24 @@ reuse rather than duplicate.
   since the status check itself can't complete. `cmdKeyRotate` checks
   `loadKeys().current()` first for exactly this reason; the ordering is load
   bearing, not stylistic.
+- **The `git status` spawn strips `SECUREGIT_SESSION_KEY`/
+  `SECUREGIT_PASSPHRASE`/`SECUREGIT_IDENTITY_FILE` from the child's
+  environment before adding its own `HOME` override — found by a real CI
+  failure, not by reasoning about it in advance.** That `clean` invocation
+  is a genuine nested subprocess: `git` spawns the filter itself to compare
+  the worktree against the index, and whatever env the `git status` spawn
+  gets, the filter it spawns gets too. Once `SECUREGIT_PASSPHRASE` became a
+  filter-time source ([07](07-unlock-session.md)), an unstripped env meant
+  every dirty-check re-derived the key via scrypt inside that nested
+  subprocess instead of reading the session `unlock` had already written
+  moments earlier — pure waste when the test harness's default environment
+  happens to carry a passphrase (which it does, for the interactive-prompt
+  fallback these three variables predate), and, nested inside a real
+  subprocess tree under CI's tighter resource constraints, slow enough to
+  destabilize the dirty-check itself. These three variables authenticate
+  the `runCli()` invocation that reads them, not any subprocess it merely
+  spawns — the same distinction `07-unlock-session.md`'s "Non-interactive
+  unlock" precedence draws for `loadKeys()` itself.
 - **The recipient-count confirmation (`--confirm-recipients <n>`) is loaded
   and checked right after the locked check, before the dirty-tree check —
   not after rotation, where the old version only used the recipient list to

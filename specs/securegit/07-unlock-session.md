@@ -164,6 +164,18 @@ A CI runner given any of these **is a trusted machine** by
 [01](01-threat-model.md)'s definition, and should hold a dedicated recipient key
 that can be revoked without touching anyone else's ([09](09-rotation-recovery.md)).
 
+**None of the three authenticate anything beyond the single `runCli()`
+invocation that reads them — they must never cascade into a subprocess a
+command merely spawns.** Found the hard way: `key rotate`'s dirty-check
+spawns a real `git status`, which spawns `clean` itself as a nested
+subprocess to compare the worktree against the index — before that spawn
+was corrected to strip these three first, whatever was in the parent
+invocation's environment reached the nested filter too, making it
+re-authenticate via a fresh scrypt derivation instead of reading the
+session that invocation's own `unlock` had already written. See
+[09](09-rotation-recovery.md)'s "What this pass actually built" for the
+fix and how a real CI failure, not a design review, is what surfaced it.
+
 **`SECUREGIT_PASSPHRASE` is the one source that breaks this document's core
 principle** ("Unlocking is an explicit act with a lifetime") **by design,
 not by oversight.** A session — file or `SECUREGIT_SESSION_KEY` — always

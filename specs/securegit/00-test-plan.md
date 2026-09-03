@@ -585,8 +585,10 @@ but `.securegit/config.json`.
 
 A third batch closes the last two rows and the whole "prove existing
 behavior against real git" list, except the two items already carved out
-as deliberately deferred (removing the last recipient, and F13's
-concurrent-rotation race — both need infrastructure well beyond a test).
+as deliberately deferred at the time (removing the last recipient — later
+reconsidered and confirmed as a deliberate non-goal, not an infrastructure
+gap, see [08](08-multi-recipient.md) — and F13's concurrent-rotation race,
+which does need infrastructure well beyond a test).
 One new top-level describe block covers a real recipient join, removal,
 rotation and `reencrypt`, end to end: a contractor identity is added as a
 recipient and unlocks once while access is live; after that identity is
@@ -767,10 +769,26 @@ fingerprint/label/added-at/added-by/generations (and a `git log`-derived
 array directly, unwrapped, unlike `key list`'s `{current, generations}`
 shape — there's only the one thing this command reports.
 
-Only three items remain deferred, each for the same stated reason as
-before: refusing removal of the last recipient, `padTo`/`bindPath`
-change-refusal (no primitive exists to change either post-`init`), and
-F13's concurrent-rotation race (needs a real multi-process harness).
+Revisiting "refusing removal of the last recipient" — one of the
+remaining deferred items — settled it rather than closing it: reconsidered
+directly, a hard refusal turns out to be the wrong fix. Removing a
+recipient never touches the local keyring, so whoever runs
+`remove-recipient` almost always still has their own passphrase access
+regardless of how many recipients remain — a refusal wouldn't protect
+*them*. The actual risk it would exist to catch (losing all access) is
+already caught, more precisely, by the existing single-point-of-failure
+advisory in `verify`/`status` (keyed on holders, not recipient count, and
+a warning rather than a block, since "you're now the only one with
+access" isn't inherently a mistake). A hard refusal would have blocked a
+legitimate operation — revoking a departing contractor who happened to be
+the last recipient on record — to guard against a risk it's the wrong
+proxy for. See [08](08-multi-recipient.md) for the full reasoning; spec's
+Test Cases row marked N/A rather than 🔲, since this isn't pending, it's
+decided.
+
+Two items remain genuinely deferred: `padTo`/`bindPath` change-refusal (no
+primitive exists to change either post-`init`), and F13's
+concurrent-rotation race (needs a real multi-process harness).
 
 700 unit tests, all green; 40 integration tests, all green. The package is
 TypeScript (`src/` → `dist/`, NodeNext, `strict` plus

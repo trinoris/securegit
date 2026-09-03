@@ -485,9 +485,11 @@ proves `resolveKeyringPath()` resolves under `home` and that `initConfig()`
 leaves nothing under the repository but `.securegit/config.json`.
 
 A third batch closes the last two rows and the whole "prove existing
-behavior against real git" list, except two items already deliberately
-deferred (removing the last recipient, F13's concurrent-rotation race — both
-need infrastructure well beyond a test). One describe block covers a real
+behavior against real git" list, except two items deliberately deferred at
+the time (removing the last recipient — later reconsidered and confirmed
+as a deliberate non-goal, not an infrastructure gap — and F13's
+concurrent-rotation race, which does need infrastructure well beyond a
+test). One describe block covers a real
 recipient join, removal, rotation and `reencrypt` end to end: a contractor
 identity unlocks once while access is live, then keeps decrypting the
 pre-rotation blob after being removed and the repo rotated — an
@@ -590,9 +592,16 @@ against every provider id actually present. This also closed spec 06's
 renders. `--json` writes the report's `recipients` array directly,
 unwrapped.
 
-Only three items remain deferred: refusing removal of the last recipient,
-`padTo`/`bindPath` change-refusal (no primitive exists), and F13's
-concurrent-rotation race.
+Revisiting "refuse removing the last recipient" settled it rather than
+closing it: reconsidered directly, a hard refusal turns out to be the
+wrong fix. Removing a recipient never touches the local keyring, so the
+person doing it almost always keeps their own access regardless — a
+refusal wouldn't protect them, and the real risk (losing all access) is
+already caught, more precisely, by `verify`/`status`'s existing
+single-point-of-failure advisory. See [08](08-multi-recipient.md).
+
+Two items remain genuinely deferred: `padTo`/`bindPath` change-refusal
+(no primitive exists), and F13's concurrent-rotation race.
 
 700 unit tests total, all green; 40 integration tests, all green. TypeScript,
 `src/` → `dist/`, unit tests beside the source, matching
