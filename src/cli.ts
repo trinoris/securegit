@@ -14,7 +14,14 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { keyFingerprint } from './crypto.js';
-import { ConfigError, initConfig, readConfig, resolveKeyringPath, type RepoConfig } from './config.js';
+import {
+  ConfigError,
+  initConfig,
+  readConfig,
+  resolveKeyringPath,
+  setBindPath,
+  type RepoConfig,
+} from './config.js';
 import { InstallError, install, protect, unprotect } from './install.js';
 import {
   KeyringError,
@@ -780,13 +787,7 @@ async function cmdKeyRemoveRecipient(args: string[], io: CliIO): Promise<number>
  * keyring.
  */
 async function cmdKeyRotate(args: string[], io: CliIO): Promise<number> {
-  if (args.includes('--bind-path')) {
-    io.stderr(
-      'securegit: `key rotate --bind-path` is not implemented yet\n' +
-        '  action: rotate without --bind-path',
-    );
-    return EXIT_USAGE;
-  }
+  const bindPath = args.includes('--bind-path');
 
   // Locked has to be checked before the git-status dirty check, not after:
   // `git status` needs to run `clean` to compare a plaintext worktree
@@ -909,11 +910,17 @@ async function cmdKeyRotate(args: string[], io: CliIO): Promise<number> {
   }
 
   await writeKeyringFile(keyringPath, rotated.file);
+  // Config, not the keyring: bindPath is a repository-wide encryption
+  // policy, not something recorded per generation — 05-key-hierarchy.md.
+  // Written after the keyring succeeds, so a failure here never leaves a
+  // rotated-but-not-yet-persisted keyring silently unrecorded.
+  if (bindPath) await setBindPath(io.cwd, true);
   await lockSession({ repoId: loaded.config.repoId, path: sessionPathFor(loaded.config, io) });
 
   io.info(
-    `securegit: rotated to generation ${newGeneration}\n` +
-      `  recipients rewrapped: ${rewrapped}\n` +
+    `securegit: rotated to generation ${newGeneration}` +
+      (bindPath ? ' with bindPath enabled' : '') +
+      `\n  recipients rewrapped: ${rewrapped}\n` +
       `  action: securegit unlock` +
       (rewrapped > 0 ? '; git add .securegit/recipients && git commit && git push' : ''),
   );

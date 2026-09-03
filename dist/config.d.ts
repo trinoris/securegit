@@ -27,5 +27,20 @@ export interface InitConfigOptions {
     home?: string;
 }
 export declare function initConfig(repoDir: string, opts?: InitConfigOptions): Promise<RepoConfig>;
+/**
+ * `key rotate --bind-path`'s own primitive (05-key-hierarchy.md: "the
+ * supported path" for changing `bindPath` after `init`). Deliberately
+ * narrow — flips exactly this one field, leaving `repoId`/`padTo`/`version`
+ * untouched — and deliberately *not* used for `padTo`: padding never enters
+ * key derivation, so 14-metadata-leakage.md's documented path (hand-edit
+ * `config.json`, then `reencrypt`) already covers changing it without
+ * needing a dedicated primitive or a new generation. `bindPath` does enter
+ * derivation, which is why changing it is paired with a rotation at all —
+ * every already-committed blob keeps decrypting under whatever `bindPath`
+ * produced it, recorded in its own envelope flags, never read from here.
+ * Written atomically (temp file + rename), same discipline as
+ * `writeKeyringFile()`.
+ */
+export declare function setBindPath(repoDir: string, value: boolean): Promise<RepoConfig>;
 export declare function readConfig(repoDir: string): Promise<RepoConfig>;
 //# sourceMappingURL=config.d.ts.map

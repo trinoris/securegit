@@ -379,11 +379,13 @@ actually close (the rest of spec 14 is genuinely inherent — Git needs the
 repository's shape to be a Git repository). `envelope.ts` gained a
 length-prefixed pad/unpad scheme behind a new flags bit (`FLAG_PADDED`),
 self-describing so `unseal` never needs to know what `padTo` a blob was
-sealed under. `config.ts`'s `RepoConfig.padTo` is set only at `init`,
-immutable after — the same constraint `bindPath` already has (no "update a
-field in place" primitive exists for either); `reencrypt` is the existing
-tool for applying a hand-edited `padTo` retroactively, same as it already is
-for a key rotation. Every `seal` call site — `clean`, `reencrypt`, `merge`,
+sealed under. `config.ts`'s `RepoConfig.padTo` is set only at `init`, and
+deliberately gets no dedicated update command even after `bindPath`
+([05](05-key-hierarchy.md)) gained one (`key rotate --bind-path`) — padding
+never enters key derivation, so `reencrypt` after a hand-edited `padTo` is
+sufficient on its own, the same tool a key rotation already relies on for
+the identical "re-seal every tracked file under the new setting" step.
+Every `seal` call site — `clean`, `reencrypt`, `merge`,
 `filter-process`, `encrypt` — threads `padTo` through; `unseal` needs no
 such threading. Proven against a real commit in `git.integration.test.ts`:
 `init --pad-to 256`, a 3-byte file, a committed blob well over 256 bytes,
@@ -786,11 +788,26 @@ proxy for. See [08](08-multi-recipient.md) for the full reasoning; spec's
 Test Cases row marked N/A rather than 🔲, since this isn't pending, it's
 decided.
 
-Two items remain genuinely deferred: `padTo`/`bindPath` change-refusal (no
-primitive exists to change either post-`init`), and F13's
-concurrent-rotation race (needs a real multi-process harness).
+Revisiting `padTo`/`bindPath` change-refusal turned out to split cleanly
+in two, not one item. `padTo` was already settled by spec 14's own
+reasoning — padding never enters key derivation, so `reencrypt` after a
+hand-edit already covers changing it, no refusal or new command needed;
+the 🔲 row was a leftover from before that design was written down,
+corrected to N/A rather than built around. `bindPath` was the one real
+gap: `key rotate --bind-path`, previously refused with "not implemented
+yet," is now built. `setBindPath()` (`src/config.ts`) flips exactly the
+`bindPath` field atomically, called only after the rotation itself
+succeeds — a failure updating config never leaves a rotated-but-unrecorded
+keyring. Old, already-committed generations keep decrypting under
+whatever `bindPath` produced them regardless: the flag lives in each
+envelope's own `flags` byte, and `unseal()` has no `bindPath` parameter at
+all to read a "current" value from even if it wanted to.
 
-700 unit tests, all green; 40 integration tests, all green. The package is
+Only F13's concurrent-rotation race remains deferred — needs a real
+multi-process harness, meaningfully higher effort than everything else
+closed this session.
+
+705 unit tests, all green; 40 integration tests, all green. The package is
 TypeScript (`src/` → `dist/`, NodeNext, `strict` plus
 `noUncheckedIndexedAccess` and `exactOptionalPropertyTypes`), matching
 `@trinoris/decision-core`. Unit

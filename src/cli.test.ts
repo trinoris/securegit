@@ -1617,9 +1617,42 @@ describe('key rotate / reencrypt', () => {
   }
 
   describe('key rotate', () => {
-    it('refuses --bind-path (not yet implemented)', async () => {
+    it('--bind-path rotates, enables bindPath going forward, and old generations still decrypt', async () => {
       const h = await setUp();
-      expect(await h.run(['key', 'rotate', '--bind-path'])).toBe(4);
+
+      // Before rotation: bindPath is off — the same content at two
+      // different paths converges to identical ciphertext.
+      expect(await h.run(['clean', '--', 'a.json'], { stdin: PT1, env: {} })).toBe(0);
+      const beforeA = h.stdoutBuf();
+      expect(await h.run(['clean', '--', 'b.json'], { stdin: PT1, env: {} })).toBe(0);
+      const beforeB = h.stdoutBuf();
+      expect(beforeA.equals(beforeB)).toBe(true);
+
+      expect(await h.run(['key', 'rotate', '--bind-path', '--confirm-recipients', '0'])).toBe(0);
+      const config = JSON.parse(
+        await readFile(join(realDir, '.securegit', 'config.json'), 'utf8'),
+      ) as { bindPath: boolean };
+      expect(config.bindPath).toBe(true);
+
+      await h.run(['unlock']);
+
+      // After rotation: bindPath is on — the same content at the same two
+      // paths now diverges (path entered the derivation).
+      expect(await h.run(['clean', '--', 'a.json'], { stdin: PT1, env: {} })).toBe(0);
+      const afterA = h.stdoutBuf();
+      expect(await h.run(['clean', '--', 'b.json'], { stdin: PT1, env: {} })).toBe(0);
+      const afterB = h.stdoutBuf();
+      expect(afterA.equals(afterB)).toBe(false);
+
+      // Generation 1's already-committed blob — made before bindPath was
+      // ever enabled — still decrypts correctly.
+      const committed = await execFile('git', ['cat-file', '-p', `HEAD:${PATH}`], {
+        cwd: realDir,
+        encoding: 'buffer',
+        env: gitEnv(realHome),
+      });
+      expect(await h.run(['smudge', '--', PATH], { stdin: committed.stdout, env: {} })).toBe(0);
+      expect(h.stdoutBuf().equals(PT1)).toBe(true);
     });
 
     it('refuses without --confirm-recipients, printing the (empty) recipient list', async () => {

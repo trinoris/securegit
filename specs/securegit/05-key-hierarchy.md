@@ -144,11 +144,19 @@ is a daily cost and blob relocation is an attack that presupposes push access �
 which signed commits and protected branches already address, and which
 `bindPath` addresses only for protected files.
 
-Set in `.securegit/config.json` at `init`. **It cannot be changed afterwards
-without re-encrypting**, because it changes every derivation; `securegit key
-rotate --bind-path` is the supported path ([09](09-rotation-recovery.md)) and
-leaves old generations readable under the old setting. The flag is recorded in
-each envelope's `flags` byte so a blob always states which rule produced it.
+Set in `.securegit/config.json` at `init`, and — as of `key rotate
+--bind-path` — changeable afterwards too, always paired with a rotation
+because it changes every derivation going forward: `setBindPath()`
+(`src/config.ts`) flips the field atomically, written only after the
+rotation itself succeeds, so a failure never leaves a rotated-but-unrecorded
+keyring. Old generations keep decrypting under whatever setting produced
+them — the flag is recorded in each envelope's own `flags` byte, and
+`unseal()` has no `bindPath` parameter at all, so decrypt-time behavior is
+structurally incapable of reading anything but what the envelope itself
+carries, never the repository's current config. `padTo` needs no
+equivalent primitive: it never enters derivation at all, so
+[14](14-metadata-leakage.md)'s documented path (hand-edit `config.json`,
+then `reencrypt`) already covers changing it without a dedicated command.
 
 ## The tracked half: `.securegit/config.json`
 
@@ -166,7 +174,8 @@ checkout (accepting either a `.git` directory or a worktree's `.git` *file*),
 and it is written with ordinary file permissions: unlike the keyring or the
 session cache, this file is supposed to be world-readable, because it carries
 nothing an observer with the repository doesn't already have. `bindPath` is set
-here once and, per above, cannot be changed without a rotation.
+here at `init` and, per above, only ever changed again through `key rotate
+--bind-path` — never in place, never without a rotation alongside it.
 
 ## Key material at rest
 
@@ -202,6 +211,8 @@ on top of, not instead of, `verify`'s own equivalent check.
 | `bindPath=true` envelope fails under a different path | `src/envelope.test.ts` | — | ✅ |
 | `bindPath` is recorded in `flags` and honoured on decrypt | `src/envelope.test.ts` | — | ✅ |
 | Changing `bindPath` in config does not silently break old blobs | `src/filter.test.ts` | — | ✅ (`unseal()` has no `bindPath` parameter at all — decrypt always uses each envelope's own recorded flag, structurally, never a caller's "current config" value; `keyring.ts` has no bindPath concept to test in the first place) |
+| `key rotate --bind-path` rotates, flips config `bindPath` to `true`, and content encrypted afterward is genuinely path-bound (same content at two paths diverges, having converged before) | `src/cli.test.ts` | `repo-protected/` | ✅ |
+| `setBindPath()` flips exactly `bindPath`, leaving `repoId`/`padTo`/`version` untouched, atomically | `src/config.test.ts` | — | ✅ |
 | Keyring inside a working tree is refused at `init` | `src/config.test.ts` | — | ✅ |
 | Keyring file is created with mode `0600` | `src/keyring.test.ts` | — | ✅ |
 

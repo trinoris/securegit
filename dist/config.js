@@ -5,7 +5,7 @@
 // no key yet must still be able to read it to find out which keyring it
 // needs.
 // See specs/securegit/02-git-integration.md and 05-key-hierarchy.md.
-import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import { join, relative, isAbsolute, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 export class ConfigError extends Error {
@@ -73,6 +73,35 @@ export async function initConfig(repoDir, opts = {}) {
     await mkdir(join(repoDir, '.securegit'), { recursive: true });
     await writeFile(path, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
     return config;
+}
+/**
+ * `key rotate --bind-path`'s own primitive (05-key-hierarchy.md: "the
+ * supported path" for changing `bindPath` after `init`). Deliberately
+ * narrow — flips exactly this one field, leaving `repoId`/`padTo`/`version`
+ * untouched — and deliberately *not* used for `padTo`: padding never enters
+ * key derivation, so 14-metadata-leakage.md's documented path (hand-edit
+ * `config.json`, then `reencrypt`) already covers changing it without
+ * needing a dedicated primitive or a new generation. `bindPath` does enter
+ * derivation, which is why changing it is paired with a rotation at all —
+ * every already-committed blob keeps decrypting under whatever `bindPath`
+ * produced it, recorded in its own envelope flags, never read from here.
+ * Written atomically (temp file + rename), same discipline as
+ * `writeKeyringFile()`.
+ */
+export async function setBindPath(repoDir, value) {
+    const config = await readConfig(repoDir);
+    const updated = { ...config, bindPath: value };
+    const path = configPath(repoDir);
+    const tmp = `${path}.tmp-${process.pid}-${randomBytes(4).toString('hex')}`;
+    await writeFile(tmp, `${JSON.stringify(updated, null, 2)}\n`, 'utf8');
+    try {
+        await rename(tmp, path);
+    }
+    catch (e) {
+        await unlink(tmp).catch(() => { });
+        throw e;
+    }
+    return updated;
 }
 export async function readConfig(repoDir) {
     const path = configPath(repoDir);

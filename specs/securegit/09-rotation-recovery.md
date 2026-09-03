@@ -243,12 +243,16 @@ reuse rather than duplicate.
   `--yes`, deliberately: it has to catch a genuine mismatch (someone added
   or removed since the operator last looked), not just acknowledge a
   warning was shown.
-- **`--bind-path` is refused, not silently ignored.** `config.ts` has no
-  function to update an already-initialised repository's `bindPath` — only
-  `initConfig` sets it, once, at `init`. Silently ignoring the flag would be
-  worse than refusing it: the operator asked for one thing and got another
-  with no indication. Refusing with a clear message is the honest choice
-  until that primitive exists.
+- **`--bind-path` is implemented, not refused.** Was refused with a clear
+  message until `config.ts` grew the missing primitive — `setBindPath()`,
+  which flips exactly `bindPath` atomically, leaving `repoId`/`padTo`/
+  `version` untouched. Called only after the rotation itself has already
+  succeeded and the new keyring is written, so a failure updating config
+  never leaves a rotated-but-unrecorded keyring; `key rotate --bind-path`
+  reports "with bindPath enabled" alongside the usual rotation summary.
+  `padTo` deliberately got no equivalent primitive: it never enters key
+  derivation, so [14](14-metadata-leakage.md)'s already-documented path
+  (hand-edit `config.json`, then `reencrypt`) covers it without one.
 - **`reencrypt` never writes ciphertext to the worktree file.** It stages a
   new blob via `hash-object`/`update-index` plumbing directly — the same
   technique the test fixtures throughout this project use to stage content
@@ -366,7 +370,7 @@ that is out of scope for this pass.
 | Test | Test File | Fixture | Status |
 |------|-----------|---------|--------|
 | `rotate` adds a generation and keeps all earlier ones | `src/keyring.test.ts` | — | ✅ |
-| `rotate` refuses `--bind-path` (not implemented) | `src/cli.test.ts` | — | ✅ |
+| `rotate --bind-path` rotates and enables `bindPath`, old generations still decrypt | `src/cli.test.ts` | — | ✅ |
 | `rotate` refuses on a dirty working tree | `src/cli.test.ts` | `repo-protected/` | ✅ |
 | `rotate` refuses when locked (checked before the dirty-tree check) | `src/cli.test.ts` | — | ✅ |
 | `rotate` refuses without `--confirm-recipients`, printing the recipient list | `src/cli.test.ts` | — | ✅ |

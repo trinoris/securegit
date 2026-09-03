@@ -9,6 +9,7 @@ import {
   generateRepoId,
   initConfig,
   readConfig,
+  setBindPath,
 } from './config.js';
 
 let dir: string;
@@ -186,5 +187,46 @@ describe('readConfig()', () => {
     await mkdir(join(dir, '.securegit'), { recursive: true });
     await writeFile(configPath(dir), 'not json', 'utf8');
     await expect(readConfig(dir)).rejects.toBeInstanceOf(ConfigError);
+  });
+});
+
+// `key rotate --bind-path`'s own primitive (05-key-hierarchy.md: "the
+// supported path" for changing bindPath after init, since it enters key
+// derivation and every already-rotated generation must keep decrypting
+// under whatever setting produced it — recorded per envelope, never read
+// from here). padTo needs no equivalent: it never enters derivation, so
+// 14-metadata-leakage.md's own documented path (hand-edit config.json,
+// then `reencrypt`) already covers it without a dedicated primitive.
+describe('setBindPath()', () => {
+  it('flips bindPath, leaving repoId/padTo/version untouched', async () => {
+    const before = await initConfig(dir, { padTo: 256 });
+    const updated = await setBindPath(dir, true);
+    expect(updated.bindPath).toBe(true);
+    expect(updated.repoId).toBe(before.repoId);
+    expect(updated.padTo).toBe(before.padTo);
+    expect(updated.version).toBe(before.version);
+  });
+
+  it('persists — readConfig() reflects it afterward', async () => {
+    await initConfig(dir);
+    await setBindPath(dir, true);
+    expect((await readConfig(dir)).bindPath).toBe(true);
+  });
+
+  it('can flip back to false', async () => {
+    await initConfig(dir, { bindPath: true });
+    const updated = await setBindPath(dir, false);
+    expect(updated.bindPath).toBe(false);
+    expect((await readConfig(dir)).bindPath).toBe(false);
+  });
+
+  it('throws ConfigError when the repository was never initialised', async () => {
+    await expect(setBindPath(dir, true)).rejects.toBeInstanceOf(ConfigError);
+  });
+
+  it('leaves no stray temp file behind', async () => {
+    await initConfig(dir);
+    await setBindPath(dir, true);
+    expect(await readdir(join(dir, '.securegit'))).toEqual(['config.json']);
   });
 });

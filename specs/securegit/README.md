@@ -324,9 +324,10 @@ mitigation, the one part of metadata leakage this design can actually
 close. `envelope.ts` gained a length-prefixed pad/unpad scheme behind a new
 flags bit (`FLAG_PADDED`), self-describing so `unseal` never needs to know
 what `padTo` a blob was sealed under; `config.ts`'s `RepoConfig.padTo` is
-set only at `init`, immutable after — the same constraint `bindPath`
-already has, for the same reason (no "update a field in place" primitive
-exists for either). Every place that calls `seal` — `clean`, `reencrypt`,
+set only at `init`, and deliberately gets no dedicated update command even
+after `bindPath` ([05](05-key-hierarchy.md)) gained one (`key rotate
+--bind-path`) — padding never enters key derivation, so `reencrypt` after
+a hand-edit already covers it. Every place that calls `seal` — `clean`, `reencrypt`,
 `merge`, `filter-process`, `encrypt` — now threads it through; `unseal`/
 `smudge`/`decrypt` need no such threading, since the padded state travels
 with the envelope itself. Proven against a real commit: `init --pad-to 256`,
@@ -600,10 +601,18 @@ refusal wouldn't protect them, and the real risk (losing all access) is
 already caught, more precisely, by `verify`/`status`'s existing
 single-point-of-failure advisory. See [08](08-multi-recipient.md).
 
-Two items remain genuinely deferred: `padTo`/`bindPath` change-refusal
-(no primitive exists), and F13's concurrent-rotation race.
+Revisiting `padTo`/`bindPath` change-refusal split in two. `padTo` was
+already settled elsewhere in the specs — padding never enters key
+derivation, so `reencrypt` after a hand-edit already covers it, no refusal
+needed; the old 🔲 row predated that decision and is now corrected to N/A.
+`bindPath` was the real gap: `key rotate --bind-path` is built now —
+`setBindPath()` flips the field atomically, only after the rotation itself
+succeeds, and old generations keep decrypting under whatever `bindPath`
+produced them regardless (recorded per envelope, never read from config).
 
-700 unit tests total, all green; 40 integration tests, all green. TypeScript,
+Only F13's concurrent-rotation race remains deferred.
+
+705 unit tests total, all green; 40 integration tests, all green. TypeScript,
 `src/` → `dist/`, unit tests beside the source, matching
 `@trinoris/decision-core`.
 

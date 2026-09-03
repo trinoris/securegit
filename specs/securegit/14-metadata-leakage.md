@@ -112,16 +112,20 @@ Padding is deliberately **not** the default. It buys a coarse bucket, not
 anonymity, and a user who enables it should have decided that sizes are part of
 their threat model rather than inheriting it from a default.
 
-As built, `padTo` is set only via `securegit init --pad-to <n>` — there is
-no command to change it on an already-initialised repository, the same
-constraint `bindPath` already has and for the same reason: `config.ts` has
-no "update this field in place" primitive for either. This isn't a hole
-specific to padding — changing it later is exactly what `reencrypt`
-(already built, [09](09-rotation-recovery.md)) is for: re-run it after
-editing `padTo` by hand in `.securegit/config.json`, and every protected
-file still tracked gets re-sealed under the new value, since `reencrypt`
-compares against a freshly-computed `clean()` output and stages whatever
-differs.
+As built, `padTo` is set at `securegit init --pad-to <n>`, and — unlike
+`bindPath` ([05](05-key-hierarchy.md), which now has its own dedicated
+update path, `key rotate --bind-path`, since padding and path-binding are
+not the same kind of change — there is deliberately no equivalent command
+for `padTo`. Padding never enters key derivation, so changing it doesn't
+need a rotation or a new generation at all: hand-edit `padTo` in
+`.securegit/config.json`, then run `reencrypt` (already built,
+[09](09-rotation-recovery.md)) — every protected file still tracked gets
+re-sealed under the new value, since `reencrypt` compares against a
+freshly-computed `clean()` output and stages whatever differs. Building a
+`--pad-to <n>` flag on `key rotate` to match `--bind-path`'s shape was
+considered and deliberately rejected: it would imply padding needs a new
+generation the way `bindPath` genuinely does, which isn't true, and would
+just be a second way to do what hand-edit-then-`reencrypt` already does.
 
 ## M8: equality, and what it costs
 
@@ -179,15 +183,16 @@ state travels with the envelope itself, in the flag bit.
   silently truncated by the latter; the spec's own test case calls this out
   explicitly, and the length-prefixed design was chosen for exactly this
   reason rather than discovered as a bug afterward.
-- **`padTo` is set only via `securegit init --pad-to <n>`, immutable after
-  — matching `bindPath`'s existing constraint, not a new one invented for
-  padding.** `config.ts` has no "update a field in an already-initialised
-  repository" primitive for either value; building one is out of scope
-  here, same as it was for `key rotate --bind-path` (refused, not
-  implemented — [09](09-rotation-recovery.md)). `reencrypt` is the existing
-  tool for applying a `padTo` changed by hand in `config.json` to every
-  currently-tracked protected file, exactly as it already is for a key
-  rotation.
+- **`padTo` is set only via `securegit init --pad-to <n>`, and deliberately
+  gets no dedicated update command — not the same constraint `bindPath`
+  has, even though it looked that way at the time this was first written.**
+  `bindPath` later gained `key rotate --bind-path` ([05](05-key-hierarchy.md),
+  [09](09-rotation-recovery.md)) precisely because it enters key
+  derivation and genuinely needs a rotation boundary. Padding never enters
+  derivation, so it never needed the equivalent primitive in the first
+  place: `reencrypt` after a hand-edited `padTo` in `config.json` already
+  covers changing it, for every currently-tracked protected file, with no
+  rotation and no refusal required.
 - **Proven against a real commit, not just `envelope.ts`'s own injected
   buffers.** A new `git.integration.test.ts` block runs `init --pad-to 256`,
   commits a 3-byte file, and checks the committed blob is well over 256
@@ -226,7 +231,7 @@ state travels with the envelope itself, in the flag bit.
 | Padding disabled by default (envelope, and `RepoConfig.padTo`) | `src/envelope.test.ts`, `src/config.test.ts` | — | ✅ |
 | `init --pad-to` round-trips through a real commit, larger blob, exact checkout | `src/git.integration.test.ts` | — | ✅ |
 | `clean`/`smudge`/`merge`/`filter-process` all apply the repository's `padTo` | `src/filter.test.ts`, `src/merge.test.ts`, `src/process.test.ts`, `src/cli.test.ts` | — | ✅ |
-| `padTo` change is refused without a rotation | `src/config.test.ts` | — | 🔲 (there is no command to change `padTo` post-`init` at all — same as `bindPath` — so there is nothing to "refuse" via the CLI; a hand-edit of `config.json` bypasses any such check by construction) |
+| `padTo` change is refused without a rotation | `src/config.test.ts` | — | N/A — superseded by the design decided earlier in this document ("As built, `padTo` is set only via..." above): padding never enters key derivation, so unlike `bindPath` ([05](05-key-hierarchy.md)), changing it needs no rotation and no refusal — the documented path is hand-edit `config.json`, then `reencrypt`, which this file's own prose already settles. This row predates that decision; left standing as 🔲 would misleadingly suggest a refusal is still owed |
 | `metadataReport()` lists all 12 observables, each with a code and a note | `src/verify.test.ts` | — | ✅ |
 | Every inherent (non-configurable) observable always applies | `src/verify.test.ts` | — | ✅ |
 | M2 reflects `padTo`: unmitigated at 0, partially mitigated once set | `src/verify.test.ts` | — | ✅ |
