@@ -27,7 +27,14 @@ import {
   writeKeyringFile,
 } from './keyring.js';
 import { PassphraseFileProvider, ProviderError } from './provider.js';
-import { lockSession, readSession, resolveSessionPath, writeSession } from './session.js';
+import {
+  keySourceFromSessionKey,
+  lockSession,
+  lockedKeySource,
+  readSession,
+  resolveSessionPath,
+  writeSession,
+} from './session.js';
 import { LockedError, clean, smudge, textconv, type KeySource } from './filter.js';
 import { EnvelopeError, parseEnvelope, seal, unseal } from './envelope.js';
 import {
@@ -133,7 +140,103 @@ function sessionPathFor(config: RepoConfig, io: CliIO): string {
 
 type Loaded = { ok: true; config: RepoConfig; keys: KeySource } | { ok: false; code: number };
 
-/** The read side shared by clean/smudge/textconv/encrypt/decrypt: config + session. */
+/**
+ * `SECUREGIT_PASSPHRASE` as a filter-time source (07-unlock-session.md's
+ * "Non-interactive unlock" table, second precedence): unwraps the *local*
+ * keyring file directly, bypassing the session entirely — no `unlock` ever
+ * has to run, nothing is written to disk. Fails closed (a locked-shaped
+ * `KeySource`, never a throw) on a missing local keyring, a wrong
+ * passphrase, or a keyring for a different `repoId` — the same set of
+ * outcomes `readSession()`/`keySourceFromSessionKey()` already fail closed
+ * on, so every source in this precedence chain behaves identically to a
+ * caller that only ever sees the returned `KeySource`.
+ *
+ * Deliberately uncached here: scrypt unwrap is meant to cost real
+ * wall-clock time once per unlock, not once per file, and there is no way
+ * for a one-shot `clean`/`smudge` process to remember it paid that cost
+ * already — each invocation is a fresh process. `runFilterProcess` below
+ * caches this per server lifetime instead, which is the one context where
+ * "once" is actually achievable without writing a session to disk.
+ */
+async function keySourceFromPassphraseEnv(
+  passphrase: string,
+  config: RepoConfig,
+  io: { home: string; stderr: (message: string) => void },
+): Promise<KeySource> {
+  let file;
+  try {
+    file = await readKeyringFile(resolveKeyringPath(config.repoId, io.home));
+  } catch {
+    return lockedKeySource(); // no local keyring: this source has nothing to offer
+  }
+  const provider = new PassphraseFileProvider(() => passphrase);
+  try {
+    return await unlockKeyring(file, [provider], { expectedRepoId: config.repoId, warn: io.stderr });
+  } catch {
+    return lockedKeySource(); // e.g. a keyring for a different repoId — fail closed, not a throw
+  }
+}
+
+/**
+ * `SECUREGIT_IDENTITY_FILE` (third precedence) names *which* identity to
+ * join with, but carries no secret of its own — `SECUREGIT_PASSPHRASE`
+ * unlocks it, the same env var `keySourceFromPassphraseEnv` otherwise uses
+ * for the *local keyring*. So this isn't really a fourth independent
+ * check: when both are set, `SECUREGIT_IDENTITY_FILE` changes what
+ * `SECUREGIT_PASSPHRASE` is applied *to* (this identity, not the local
+ * keyring) rather than sitting behind it in the precedence order. Mirrors
+ * `cmdUnlockViaRecipient`'s core logic exactly, minus the session write —
+ * this never touches disk. Fails closed on every step: a missing or
+ * unreadable identity file, a wrong passphrase, no matching recipient
+ * file, or a recipient file that doesn't cover any generation this
+ * identity can decrypt.
+ */
+async function keySourceFromIdentityFileEnv(
+  identityFilePath: string,
+  passphrase: string,
+  config: RepoConfig,
+  io: { cwd: string },
+): Promise<KeySource> {
+  let identity;
+  try {
+    identity = await readIdentityFile(identityFilePath);
+  } catch {
+    return lockedKeySource();
+  }
+  const provider = new PassphraseFileProvider(() => passphrase);
+  let privateKey: Buffer | null;
+  try {
+    privateKey = await unlockIdentity(identity, [provider]);
+  } catch {
+    return lockedKeySource();
+  }
+  if (privateKey === null) return lockedKeySource();
+  const identityKeyPair: X25519KeyPair = { publicKey: decodePublicKey(identity.publicKey), privateKey };
+
+  let recipient: RecipientFile;
+  try {
+    recipient = await readRecipientFile(recipientPath(io.cwd, identity.fingerprint));
+  } catch {
+    return lockedKeySource();
+  }
+
+  return unlockFromRecipientFile(recipient, identityKeyPair, config.repoId);
+}
+
+/**
+ * The read side shared by clean/smudge/textconv/encrypt/decrypt: config,
+ * then whichever key source applies (07-unlock-session.md's "Non-interactive
+ * unlock" precedence) — `SECUREGIT_SESSION_KEY`, then `SECUREGIT_PASSPHRASE`
+ * (itself branching on whether `SECUREGIT_IDENTITY_FILE` is also set — see
+ * `keySourceFromIdentityFileEnv`'s doc comment for why that's a branch, not
+ * a fourth independent tier), then the session file. The first one present
+ * wins outright; it is not merely tried first and fallen back from — a
+ * `SECUREGIT_SESSION_KEY` that fails to decode never falls through to
+ * `SECUREGIT_PASSPHRASE`, and a `SECUREGIT_PASSPHRASE` that unwraps to
+ * nothing (local keyring or identity, whichever applies) never falls
+ * through to the session file, matching `keySourceFromSessionKey()`'s own
+ * "replaces, does not supplement" behavior.
+ */
 async function loadKeys(io: CliIO): Promise<Loaded> {
   let config: RepoConfig;
   try {
@@ -142,12 +245,28 @@ async function loadKeys(io: CliIO): Promise<Loaded> {
     io.stderr((e as Error).message);
     return { ok: false, code: EXIT_MISCONFIGURED };
   }
-  const keys = await readSession({
-    repoId: config.repoId,
-    path: sessionPathFor(config, io),
-    warn: io.stderr,
-    ...(io.now !== undefined ? { now: io.now } : {}),
-  });
+  const sessionKeyEnv = io.env.SECUREGIT_SESSION_KEY;
+  const passphraseEnv = io.env.SECUREGIT_PASSPHRASE;
+  const identityFileEnv = io.env.SECUREGIT_IDENTITY_FILE;
+  let keys: KeySource;
+  if (sessionKeyEnv !== undefined && sessionKeyEnv.length > 0) {
+    keys = keySourceFromSessionKey(sessionKeyEnv, {
+      repoId: config.repoId,
+      ...(io.now !== undefined ? { now: io.now } : {}),
+    });
+  } else if (passphraseEnv !== undefined && passphraseEnv.length > 0) {
+    keys =
+      identityFileEnv !== undefined && identityFileEnv.length > 0
+        ? await keySourceFromIdentityFileEnv(identityFileEnv, passphraseEnv, config, io)
+        : await keySourceFromPassphraseEnv(passphraseEnv, config, io);
+  } else {
+    keys = await readSession({
+      repoId: config.repoId,
+      path: sessionPathFor(config, io),
+      warn: io.stderr,
+      ...(io.now !== undefined ? { now: io.now } : {}),
+    });
+  }
   return { ok: true, config, keys };
 }
 
@@ -1490,6 +1609,16 @@ export async function runFilterProcess(io: FilterProcessIO): Promise<number> {
   }
 
   const sessionPath = resolveSessionPath(config.repoId, io.env, io.home);
+  const sessionKeyEnv = io.env.SECUREGIT_SESSION_KEY;
+  const passphraseEnv = io.env.SECUREGIT_PASSPHRASE;
+  const identityFileEnv = io.env.SECUREGIT_IDENTITY_FILE;
+  // Unlike `loadKeys()`'s one-shot form, a single `filter-process` server
+  // lives for the whole git operation — so unless a real session is behind
+  // it, SECUREGIT_PASSPHRASE's (or SECUREGIT_IDENTITY_FILE's) scrypt unwrap
+  // only has to happen once here, not once per blob. Computed lazily (only
+  // if the env var is actually set and SECUREGIT_SESSION_KEY didn't already
+  // win) and cached for the rest of this process's lifetime.
+  let cachedPassphraseKeys: Promise<KeySource> | undefined;
   const server = new FilterProcessServer({
     bindPath: config.bindPath,
     padTo: config.padTo,
@@ -1497,14 +1626,33 @@ export async function runFilterProcess(io: FilterProcessIO): Promise<number> {
     warn: io.stderr,
     // Re-read per blob, deliberately — see FilterProcessContext.keys in
     // process.ts for why this is how session expiry gets re-checked without
-    // the server needing its own polling.
-    keys: () =>
-      readSession({
+    // the server needing its own polling. Same precedence as loadKeys():
+    // SECUREGIT_SESSION_KEY, then SECUREGIT_PASSPHRASE (itself branching on
+    // SECUREGIT_IDENTITY_FILE, cached either way — see above), then the
+    // session file — the first one present replaces the rest.
+    keys: () => {
+      if (sessionKeyEnv !== undefined && sessionKeyEnv.length > 0) {
+        return Promise.resolve(
+          keySourceFromSessionKey(sessionKeyEnv, {
+            repoId: config.repoId,
+            ...(io.now !== undefined ? { now: io.now } : {}),
+          }),
+        );
+      }
+      if (passphraseEnv !== undefined && passphraseEnv.length > 0) {
+        cachedPassphraseKeys ??=
+          identityFileEnv !== undefined && identityFileEnv.length > 0
+            ? keySourceFromIdentityFileEnv(identityFileEnv, passphraseEnv, config, io)
+            : keySourceFromPassphraseEnv(passphraseEnv, config, io);
+        return cachedPassphraseKeys;
+      }
+      return readSession({
         repoId: config.repoId,
         path: sessionPath,
         warn: io.stderr,
         ...(io.now !== undefined ? { now: io.now } : {}),
-      }),
+      });
+    },
   });
 
   return await new Promise<number>((resolve) => {

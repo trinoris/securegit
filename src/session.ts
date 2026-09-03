@@ -55,7 +55,7 @@ export interface WriteSessionOptions {
 }
 
 /** Always locked-shaped — a caller never has to null-check the session itself. */
-function lockedKeySource(): KeySource {
+export function lockedKeySource(): KeySource {
   return {
     current: () => null,
     find: () => null,
@@ -160,4 +160,36 @@ export async function readSession(opts: ReadSessionOptions): Promise<KeySource> 
 export async function lockSession(opts: { repoId: string; path?: string }): Promise<void> {
   const path = opts.path ?? defaultPath(opts.repoId);
   await unlink(path).catch(() => {});
+}
+
+export interface SessionKeyOptions {
+  repoId: string;
+  now?: () => Date;
+}
+
+/**
+ * Decodes `SECUREGIT_SESSION_KEY` (07-unlock-session.md's "Non-interactive
+ * unlock" table, top precedence) — the exact bytes `writeSession()` already
+ * writes to a session file, base64-encoded, handed through a child
+ * process's environment instead of a file. There is no separate command
+ * that produces this value: any caller that already holds a session file
+ * can read and re-export its own content as-is.
+ *
+ * Same fail-closed handling as `readSession()` — malformed, expired, or for
+ * the wrong repository is just "locked", never a throw — except there is no
+ * permission check to make: unlike a file, there's no stat()/chmod concept
+ * for an environment variable, so the environment is already the trust
+ * boundary and any syntactically valid, matching, unexpired value is used.
+ */
+export function keySourceFromSessionKey(value: string, opts: SessionKeyOptions): KeySource {
+  const now = opts.now ?? ((): Date => new Date());
+  let file: SessionFile;
+  try {
+    file = JSON.parse(Buffer.from(value, 'base64').toString('utf8')) as SessionFile;
+  } catch {
+    return lockedKeySource();
+  }
+  if (file.repoId !== opts.repoId) return lockedKeySource();
+  if (now().getTime() >= new Date(file.expiresAt).getTime()) return lockedKeySource();
+  return fromSessionFile(file);
 }

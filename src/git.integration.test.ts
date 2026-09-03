@@ -78,18 +78,23 @@ async function securegit(repoDir: string, home: string, args: string[]): Promise
   });
 }
 
-/** Like `securegit()`, but for a filter subcommand — feeds `stdin` and returns the real stdout. */
+/**
+ * Like `securegit()`, but for a filter subcommand — feeds `stdin` and
+ * returns the real stdout. `env` overrides the default (PATH/HOME plus the
+ * standard PASSPHRASE) entirely — for an identity that only ever joined via
+ * a recipient file and has no local keyring, `SECUREGIT_PASSPHRASE` is now
+ * also a filter-time source (07-unlock-session.md), and its presence would
+ * mask whether decryption is genuinely coming from that identity's own
+ * session.
+ */
 async function securegitCapture(
   repoDir: string,
   home: string,
   args: string[],
   stdin: Buffer,
+  env: NodeJS.ProcessEnv = { PATH: process.env.PATH, HOME: home, SECUREGIT_PASSPHRASE: PASSPHRASE },
 ): Promise<Buffer> {
-  const { stdout } = await spawnCapture('node', [BIN, ...args], {
-    cwd: repoDir,
-    env: { PATH: process.env.PATH, HOME: home, SECUREGIT_PASSPHRASE: PASSPHRASE },
-    stdin,
-  });
+  const { stdout } = await spawnCapture('node', [BIN, ...args], { cwd: repoDir, env, stdin });
   return stdout;
 }
 
@@ -857,8 +862,25 @@ describe('a removed recipient across a real rotation and reencrypt', () => {
     await rm(homeR, { recursive: true, force: true });
   });
 
+  // The contractor never has a local keyring — only a session, established
+  // via the recipient file in beforeAll. `SECUREGIT_PASSPHRASE`'s standard
+  // value in `securegitCapture()`'s default env is now also a filter-time
+  // source (07-unlock-session.md) that would try to unwrap a local keyring
+  // this identity doesn't have, masking whatever the session itself would
+  // actually say — so every call below passes its own env, with no
+  // SECUREGIT_PASSPHRASE, to prove the session is what's really deciding.
+  // `homeR` is only assigned once `beforeAll` runs, so this has to stay a
+  // function, evaluated inside each `it()`, not a value computed here.
+  const homeREnv = (): NodeJS.ProcessEnv => ({ PATH: process.env.PATH, HOME: homeR });
+
   it('the recipient can decrypt the blob committed before removal', async () => {
-    const out = await securegitCapture(dir, homeR, ['smudge', '--', PROTECTED_PATH], preRotationCiphertext);
+    const out = await securegitCapture(
+      dir,
+      homeR,
+      ['smudge', '--', PROTECTED_PATH],
+      preRotationCiphertext,
+      homeREnv(),
+    );
     expect(out.equals(PLAINTEXT)).toBe(true);
   });
 
@@ -873,7 +895,13 @@ describe('a removed recipient across a real rotation and reencrypt', () => {
     // — a local cache of a key already handed over, which removing the
     // recipient entry and rotating the repository cannot reach into and
     // erase.
-    const out = await securegitCapture(dir, homeR, ['smudge', '--', PROTECTED_PATH], preRotationCiphertext);
+    const out = await securegitCapture(
+      dir,
+      homeR,
+      ['smudge', '--', PROTECTED_PATH],
+      preRotationCiphertext,
+      homeREnv(),
+    );
     expect(out.equals(PLAINTEXT)).toBe(true);
   });
 
@@ -889,7 +917,13 @@ describe('a removed recipient across a real rotation and reencrypt', () => {
     // passthrough (10-cli-contract.md: exit 3, "a generation the keyring
     // lacks").
     await expect(
-      securegitCapture(dir, homeR, ['smudge', '--strict', '--', PROTECTED_PATH], postRotationCiphertext),
+      securegitCapture(
+        dir,
+        homeR,
+        ['smudge', '--strict', '--', PROTECTED_PATH],
+        postRotationCiphertext,
+        homeREnv(),
+      ),
     ).rejects.toThrow();
   });
 });

@@ -625,7 +625,68 @@ file — `SECUREGIT_PASSPHRASE` is wired, but only for the *interactive*
 `init`/`unlock`/`identity init` prompt fallback, a different thing.
 Flagged in spec 07 rather than silently tested around or silently struck.
 
-641 unit tests, all green; 40 integration tests, all green. The package is
+That flag got the top-precedence source built as a follow-up: a new
+`keySourceFromSessionKey()` in `src/session.ts` decodes `SECUREGIT_SESSION_KEY`
+— the exact bytes `writeSession()` already writes to a session file,
+base64-encoded, handed through a child process's environment instead of a
+file. There is deliberately no new command to *produce* this value: it's
+the session file's own content, so any caller that already holds one (a
+parent process, a CI wrapper) can already read and re-export it. Same
+fail-closed handling as `readSession()` (wrong repoId, expired, malformed
+→ locked, never a throw), minus the permission check, which has nothing to
+apply to for an env var — the environment is already the trust boundary.
+`loadKeys()` and `runFilterProcess()` in `src/cli.ts` both check it ahead
+of the session file, so when set it fully replaces the file lookup rather
+than supplementing it.
+
+`SECUREGIT_PASSPHRASE` (second precedence) is now a filter-time source too
+— `keySourceFromPassphraseEnv()` unwraps the local keyring file directly,
+so `clean`/`smudge`/`status`/everything through `loadKeys()` works without
+`unlock` ever running. This one came with a real design question, not just
+an implementation: unlike a session, it carries no `expiresAt` and `lock`
+cannot revoke it — there is no file behind it to remove — so it grants
+standing, non-time-bounded access for as long as the variable is set,
+which is in tension with this spec's own "explicit act with a lifetime"
+principle. Flagged to the project owner rather than resolved unilaterally
+(three options: revert it, keep it as documented, or bound it with new
+design work the spec doesn't currently call for); the answer was to keep
+it, accepting the tradeoff as intentional for the CI use case this row
+exists for. Fixing it up surfaced a second, sharper case of the exact same
+tension: the shared test harness's default environment always carries a
+valid passphrase, so every existing "never called `unlock`, should be
+locked" test in `src/cli.test.ts` — sixteen of them — started silently
+succeeding via this new source instead, and one `git.integration.test.ts`
+scenario (a recipient with a real session but no local keyring) started
+silently failing the opposite way, masked by the same ambient env var.
+Both fixed by having the specific calls under test opt out of
+`SECUREGIT_PASSPHRASE` explicitly, rather than changing the harness's
+shared default. Deliberately uncached for one-shot `clean`/`smudge`
+(scrypt's cost is paid again per invocation, since each is a fresh
+process); `runFilterProcess()` caches it for its own server's lifetime
+instead — proven by deleting the local keyring file between two blobs in
+one server and confirming the second still decrypts.
+
+`SECUREGIT_IDENTITY_FILE` (third precedence) closes out the whole
+"Non-interactive unlock" table. It surfaced a real ambiguity in spec 07's
+own precedence table before any code was written, learned directly from
+the `SECUREGIT_PASSPHRASE` near-miss above: the table lists it as an
+independent fourth-ranked source, but it names *which* identity to join
+with and carries no secret of its own — only `SECUREGIT_PASSPHRASE` could
+plausibly unlock it, and that variable was already spoken for at the tier
+above. Flagged before implementing rather than guessed at; the resolution
+was that `SECUREGIT_IDENTITY_FILE` isn't really an independent tier at
+all — it changes what `SECUREGIT_PASSPHRASE` is applied *to* (a named
+identity's recipient join, via `keySourceFromIdentityFileEnv()`, mirroring
+`cmdUnlockViaRecipient`'s core steps minus the session write) rather than
+sitting behind it in the order. Set without `SECUREGIT_PASSPHRASE`, it's
+never consulted at all. This time, having learned the lesson, the harness
+fallout was anticipated rather than discovered after the fact — no
+existing test broke. Cached the same way as `SECUREGIT_PASSPHRASE` in
+`runFilterProcess()`, proven the same way (delete the recipient file
+between two blobs, confirm the second still decrypts). Every row in spec
+07's precedence table is now implemented.
+
+662 unit tests, all green; 40 integration tests, all green. The package is
 TypeScript (`src/` → `dist/`, NodeNext, `strict` plus
 `noUncheckedIndexedAccess` and `exactOptionalPropertyTypes`), matching
 `@trinoris/decision-core`. Unit

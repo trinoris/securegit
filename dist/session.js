@@ -23,7 +23,7 @@ function defaultPath(repoId) {
     return resolveSessionPath(repoId, process.env, homedir());
 }
 /** Always locked-shaped — a caller never has to null-check the session itself. */
-function lockedKeySource() {
+export function lockedKeySource() {
     return {
         current: () => null,
         find: () => null,
@@ -110,5 +110,34 @@ export async function readSession(opts) {
 export async function lockSession(opts) {
     const path = opts.path ?? defaultPath(opts.repoId);
     await unlink(path).catch(() => { });
+}
+/**
+ * Decodes `SECUREGIT_SESSION_KEY` (07-unlock-session.md's "Non-interactive
+ * unlock" table, top precedence) — the exact bytes `writeSession()` already
+ * writes to a session file, base64-encoded, handed through a child
+ * process's environment instead of a file. There is no separate command
+ * that produces this value: any caller that already holds a session file
+ * can read and re-export its own content as-is.
+ *
+ * Same fail-closed handling as `readSession()` — malformed, expired, or for
+ * the wrong repository is just "locked", never a throw — except there is no
+ * permission check to make: unlike a file, there's no stat()/chmod concept
+ * for an environment variable, so the environment is already the trust
+ * boundary and any syntactically valid, matching, unexpired value is used.
+ */
+export function keySourceFromSessionKey(value, opts) {
+    const now = opts.now ?? (() => new Date());
+    let file;
+    try {
+        file = JSON.parse(Buffer.from(value, 'base64').toString('utf8'));
+    }
+    catch {
+        return lockedKeySource();
+    }
+    if (file.repoId !== opts.repoId)
+        return lockedKeySource();
+    if (now().getTime() >= new Date(file.expiresAt).getTime())
+        return lockedKeySource();
+    return fromSessionFile(file);
 }
 //# sourceMappingURL=session.js.map

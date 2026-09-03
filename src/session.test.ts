@@ -10,7 +10,9 @@ import {
   writeSession,
   readSession,
   lockSession,
+  keySourceFromSessionKey,
   type SessionEntry,
+  type WriteSessionOptions,
 } from './session.js';
 
 const REPO = 'repo-a';
@@ -225,6 +227,62 @@ describe('lockSession()', () => {
     const keys = await readSession({ repoId: REPO, path: sessionPath });
     expect(keys.current()).toBeNull();
     expect(keys.available()).toEqual([]);
+  });
+});
+
+// SECUREGIT_SESSION_KEY (07-unlock-session.md's "Non-interactive unlock"
+// table, top precedence): the same bytes `writeSession()` already puts on
+// disk, base64-encoded, handed through a child process's environment
+// instead of a file — so an already-unlocked parent can share the exact
+// session it holds with a child process without writing a second file. No
+// separate CLI surface produces this value: it's the session file's own
+// content, base64'd, which any caller can already read and re-export.
+describe('keySourceFromSessionKey()', () => {
+  async function realSessionKey(overrides: Partial<WriteSessionOptions> = {}): Promise<string> {
+    const dir = await mkdtemp(join(tmpdir(), 'securegit-session-key-'));
+    const path = join(dir, `${REPO}.session`);
+    try {
+      await writeSession({ repoId: REPO, path, entries: ENTRIES, current: KEY_ID, ...overrides });
+      const raw = await (await import('node:fs/promises')).readFile(path);
+      return raw.toString('base64');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+
+  it('decodes a real session file, base64-encoded, into a usable KeySource', async () => {
+    const value = await realSessionKey();
+    const keys = keySourceFromSessionKey(value, { repoId: REPO });
+    expect(keys.current()?.keyId).toBe(KEY_ID);
+    expect(keys.current()?.rmk.equals(RMK)).toBe(true);
+    expect(keys.available()).toEqual([KEY_ID]);
+  });
+
+  it('treats a session key for the wrong repository as locked', async () => {
+    const value = await realSessionKey();
+    const keys = keySourceFromSessionKey(value, { repoId: 'some-other-repo' });
+    expect(keys.current()).toBeNull();
+    expect(keys.available()).toEqual([]);
+  });
+
+  it('treats an expired session key as locked', async () => {
+    const base = new Date('2026-09-01T10:00:00.000Z');
+    const value = await realSessionKey({ ttlSeconds: 60, now: () => base });
+    const later = new Date(base.getTime() + 3600 * 1000);
+    const keys = keySourceFromSessionKey(value, { repoId: REPO, now: () => later });
+    expect(keys.current()).toBeNull();
+  });
+
+  it('treats malformed base64/JSON as locked, not a throw', () => {
+    expect(keySourceFromSessionKey('not valid base64 json', { repoId: REPO }).current()).toBeNull();
+    expect(keySourceFromSessionKey('', { repoId: REPO }).current()).toBeNull();
+  });
+
+  it('never checks file permissions — there is no file, the environment is already the boundary', async () => {
+    // Unlike readSession(), there is no stat()/chmod concept to fail on;
+    // any syntactically valid, matching, unexpired value is trusted.
+    const value = await realSessionKey();
+    expect(() => keySourceFromSessionKey(value, { repoId: REPO })).not.toThrow();
   });
 });
 

@@ -508,7 +508,47 @@ sources were never built — only the session file and (for interactive
 commands only) `SECUREGIT_PASSPHRASE` exist. Documented in spec 07 rather
 than silently tested around.
 
-641 unit tests total, all green; 40 integration tests, all green. TypeScript,
+That flag got its top-precedence source built as a follow-up:
+`keySourceFromSessionKey()` (`src/session.ts`) decodes `SECUREGIT_SESSION_KEY`
+— the exact bytes `writeSession()` writes to a session file, base64-encoded,
+handed through a child process's environment instead of a file. No new
+command produces this value; a caller that already holds a session file can
+just read and re-export its own content. `loadKeys()` and
+`runFilterProcess()` both check it ahead of the session file, replacing
+rather than supplementing the lookup when set.
+
+`SECUREGIT_PASSPHRASE` is now a filter-time source too, but it needed a
+real design decision first: unlike a session, it has no `expiresAt` and
+`lock` can't revoke it, so it grants standing, non-time-bounded access for
+as long as the variable is set — in tension with spec 07's own "explicit
+act with a lifetime" principle. Flagged rather than resolved unilaterally;
+the answer was to keep it, accepting the tradeoff (it's exactly what CI
+wants — an ephemeral runner, no persistence to worry about — and exactly
+what a long-lived developer shell doesn't). Fixing it up surfaced the same
+tension a second time, sharper: the shared test harness's default
+environment always carries a valid passphrase, so sixteen existing "never
+unlocked, should be locked" tests started silently succeeding instead, and
+one real-git recipient scenario started silently failing the opposite
+way — both fixed by having the specific calls opt out explicitly rather
+than changing the shared default. Uncached for one-shot `clean`/`smudge`
+(scrypt's cost, paid once per unlock by design, is paid again per
+invocation); `runFilterProcess()` caches it for its own server's
+lifetime instead.
+
+`SECUREGIT_IDENTITY_FILE` closes out the whole precedence table, and
+learning from the near-miss above paid off: spec 07's own table lists it
+as an independent fourth source, but it names *which* identity to join
+with and has no secret of its own — only `SECUREGIT_PASSPHRASE` could
+unlock it, and that variable was already spoken for one tier up. Flagged
+and resolved before writing code, not discovered after: it isn't really
+an independent tier, it changes what `SECUREGIT_PASSPHRASE` unlocks (a
+named identity's recipient join, mirroring `unlock`'s own no-local-keyring
+fallback) rather than sitting behind it. Set alone it's never consulted.
+This time no existing test broke — the harness-default interaction was
+anticipated going in. Every row in the precedence table is now
+implemented.
+
+662 unit tests total, all green; 40 integration tests, all green. TypeScript,
 `src/` → `dist/`, unit tests beside the source, matching
 `@trinoris/decision-core`.
 
