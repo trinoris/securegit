@@ -1054,6 +1054,108 @@ describe('clean / smudge', () => {
   });
 });
 
+describe('key add-provider / key remove-provider / key list', () => {
+  const BACKUP_PASSPHRASE = 'a second, independent secret!!';
+
+  it('add-provider wraps every generation for a second, independent passphrase, unlockable on its own', async () => {
+    const h = harness();
+    await h.run(['init']);
+    await h.run(['unlock']);
+
+    // SECUREGIT_PASSPHRASE stays unset here on purpose: `loadKeys()` would
+    // otherwise treat it as the credential to authenticate the *current*
+    // keyring with (07-unlock-session.md), colliding with its other job
+    // here — the *new* provider's passphrase. Already unlocked above (a
+    // real session), the new one arrives over stdin instead, same as
+    // `import-recovery`'s own two-secrets-one-command precedent.
+    expect(
+      await h.run(['key', 'add-provider', 'passphrase-file', '--label', 'backup'], {
+        env: {},
+        stdin: Buffer.from(`${BACKUP_PASSPHRASE}\n`),
+      }),
+    ).toBe(0);
+
+    // The original passphrase still works...
+    expect(await h.run(['lock'])).toBe(0);
+    expect(await h.run(['unlock'])).toBe(0);
+
+    // ...and so does the new one, entered on its own — `unlock` doesn't
+    // need to be told which provider id it belongs to.
+    expect(await h.run(['lock'])).toBe(0);
+    expect(await h.run(['unlock'], { env: { SECUREGIT_PASSPHRASE: BACKUP_PASSPHRASE } })).toBe(0);
+  });
+
+  it('add-provider refuses without a --label, colliding with the existing unlabeled provider', async () => {
+    const h = harness();
+    await h.run(['init']);
+    await h.run(['unlock']);
+    expect(await h.run(['key', 'add-provider', 'passphrase-file'])).toBe(4);
+  });
+
+  it('add-provider exits locked when the repository is locked', async () => {
+    const h = harness();
+    await h.run(['init']); // never unlocked
+    expect(
+      await h.run(['key', 'add-provider', 'passphrase-file', '--label', 'backup'], { env: {} }),
+    ).toBe(1);
+  });
+
+  it('add-provider exits usage for an unknown provider type', async () => {
+    const h = harness();
+    await h.run(['init']);
+    await h.run(['unlock']);
+    expect(await h.run(['key', 'add-provider', 'tpm2'])).toBe(4);
+  });
+
+  it('remove-provider deletes the named slot — the removed passphrase stops working, the remaining one still does', async () => {
+    const h = harness();
+    await h.run(['init']);
+    await h.run(['unlock']);
+    await h.run(['key', 'add-provider', 'passphrase-file', '--label', 'backup'], {
+      env: {},
+      stdin: Buffer.from(`${BACKUP_PASSPHRASE}\n`),
+    });
+
+    expect(await h.run(['key', 'remove-provider', 'passphrase-file'])).toBe(0);
+
+    await h.run(['lock']);
+    expect(await h.run(['unlock'])).toBe(1); // the removed (original) passphrase no longer works
+    expect(await h.run(['unlock'], { env: { SECUREGIT_PASSPHRASE: BACKUP_PASSPHRASE } })).toBe(0);
+  });
+
+  it('remove-provider refuses to remove the only provider a generation has', async () => {
+    const h = harness();
+    await h.run(['init']);
+    expect(await h.run(['key', 'remove-provider', 'passphrase-file'])).toBe(4);
+  });
+
+  it('remove-provider exits usage for an id that was never present', async () => {
+    const h = harness();
+    await h.run(['init']);
+    expect(await h.run(['key', 'remove-provider', 'never-existed'])).toBe(4);
+  });
+
+  it('list reports generations, fingerprints, dates and providers, without needing a key', async () => {
+    const h = harness();
+    await h.run(['init']);
+    expect(await h.run(['key', 'list'], { env: {} })).toBe(0);
+    const text = h.stderrText();
+    expect(text).toContain('gen 1');
+    expect(text).toContain('providers: passphrase-file');
+    expect(text).toContain('*'); // current marker
+  });
+
+  it('list --json writes the same information as structured data, to stdout', async () => {
+    const h = harness();
+    await h.run(['init']);
+    expect(await h.run(['key', 'list', '--json'], { env: {} })).toBe(0);
+    const parsed = JSON.parse(h.stdoutText());
+    expect(parsed.current).toBe(1);
+    expect(parsed.generations).toHaveLength(1);
+    expect(parsed.generations[0].providers).toEqual(['passphrase-file']);
+  });
+});
+
 describe('merge', () => {
   const PATH = 'config/production.json';
   // diff3 needs an unchanged line of context between two edits to treat them

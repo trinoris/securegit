@@ -18,6 +18,8 @@ import { ConfigError, initConfig, readConfig, resolveKeyringPath, type RepoConfi
 import { InstallError, install, protect, unprotect } from './install.js';
 import {
   KeyringError,
+  addProvider,
+  removeProvider,
   createKeyring,
   keyringFromRecoveredGenerations,
   parseKeyId,
@@ -26,8 +28,9 @@ import {
   rotateKeyring,
   unlockKeyring,
   writeKeyringFile,
+  type KeyringFile,
 } from './keyring.js';
-import { PassphraseFileProvider, ProviderError } from './provider.js';
+import { PassphraseFileProvider, ProviderError, type KeyProvider } from './provider.js';
 import {
   keySourceFromSessionKey,
   lockSession,
@@ -159,6 +162,28 @@ type Loaded = { ok: true; config: RepoConfig; keys: KeySource } | { ok: false; c
  * caches this per server lifetime instead, which is the one context where
  * "once" is actually achievable without writing a session to disk.
  */
+/**
+ * Every passphrase-file-shaped provider id actually present in `file` —
+ * the unlabeled default `init` always creates, plus any `key add-provider
+ * --label` slots — each given the same `passphrase`. A caller trying one
+ * passphrase against a keyring never says in advance which id it belongs
+ * to; `unlockKeyring()` tries each generation's slot against the provider
+ * whose id matches, so only the one whose passphrase actually fits ever
+ * succeeds.
+ */
+function passphraseProvidersFor(file: KeyringFile, passphrase: string): KeyProvider[] {
+  const ids = new Set<string>();
+  for (const gen of file.generations) {
+    for (const slot of gen.wrapped) {
+      if (slot.provider === 'passphrase-file' || slot.provider.startsWith('passphrase-file:')) {
+        ids.add(slot.provider);
+      }
+    }
+  }
+  if (ids.size === 0) ids.add('passphrase-file');
+  return [...ids].map((id) => new PassphraseFileProvider(() => passphrase, undefined, id));
+}
+
 async function keySourceFromPassphraseEnv(
   passphrase: string,
   config: RepoConfig,
@@ -170,9 +195,11 @@ async function keySourceFromPassphraseEnv(
   } catch {
     return lockedKeySource(); // no local keyring: this source has nothing to offer
   }
-  const provider = new PassphraseFileProvider(() => passphrase);
   try {
-    return await unlockKeyring(file, [provider], { expectedRepoId: config.repoId, warn: io.stderr });
+    return await unlockKeyring(file, passphraseProvidersFor(file, passphrase), {
+      expectedRepoId: config.repoId,
+      warn: io.stderr,
+    });
   } catch {
     return lockedKeySource(); // e.g. a keyring for a different repoId — fail closed, not a throw
   }
@@ -486,10 +513,12 @@ async function cmdUnlock(args: string[], io: CliIO): Promise<number> {
   }
 
   const passphrase = resolvePassphrase(io);
-  const provider = new PassphraseFileProvider(() => passphrase);
   let keys;
   try {
-    keys = await unlockKeyring(file, [provider], { warn: io.stderr, expectedRepoId: config.repoId });
+    keys = await unlockKeyring(file, passphraseProvidersFor(file, passphrase), {
+      warn: io.stderr,
+      expectedRepoId: config.repoId,
+    });
   } catch (e) {
     io.stderr((e as Error).message);
     return EXIT_MISCONFIGURED;
@@ -507,7 +536,11 @@ async function cmdUnlock(args: string[], io: CliIO): Promise<number> {
   // re-wrapped at the current one on the next successful unlock. Never
   // blocks the unlock itself — this is hygiene, not a precondition for it.
   try {
-    const { file: rewrapped, changed } = await rewrapOutdatedGenerations(file, [provider], keys);
+    const { file: rewrapped, changed } = await rewrapOutdatedGenerations(
+      file,
+      passphraseProvidersFor(file, passphrase),
+      keys,
+    );
     if (changed) {
       await writeKeyringFile(keyringPath, rewrapped);
       io.info('securegit: keyring re-wrapped at the current scrypt cost');
@@ -1027,6 +1060,150 @@ async function cmdKeyImportRecovery(args: string[], io: CliIO): Promise<number> 
   return EXIT_OK;
 }
 
+/**
+ * `key add-provider <type> [--label <label>]` (06-key-provider-port.md).
+ * `passphrase-file` is the only type that exists — the point of this
+ * command today is a *second, independent* passphrase-file secret, not a
+ * genuinely different kind of provider, since hardware providers remain
+ * unimplemented behind the same port. `--label` becomes part of the new
+ * provider's id (`passphrase-file:<label>`); omitted, it collides with the
+ * unlabeled `passphrase-file` id `init` always creates, and `addProvider()`
+ * refuses that collision with a clear message rather than this command
+ * pre-checking it separately.
+ */
+async function cmdKeyAddProvider(args: string[], io: CliIO): Promise<number> {
+  const type = args.find((a) => !a.startsWith('--'));
+  if (!type) {
+    io.stderr('usage: securegit key add-provider <type> [--label <label>]');
+    return EXIT_USAGE;
+  }
+  if (type !== 'passphrase-file') {
+    io.stderr(`securegit: unknown provider type '${type}'\n  supported: passphrase-file`);
+    return EXIT_USAGE;
+  }
+  const labelIdx = args.indexOf('--label');
+  const label = labelIdx !== -1 ? args[labelIdx + 1] : undefined;
+  const id = label ? `passphrase-file:${label}` : 'passphrase-file';
+
+  const loaded = await loadKeys(io);
+  if (!loaded.ok) return loaded.code;
+  if (loaded.keys.current() === null) {
+    io.stderr('securegit: repository is locked; run `securegit unlock`');
+    return EXIT_LOCKED;
+  }
+
+  const keyringPath = resolveKeyringPath(loaded.config.repoId, io.home);
+  let file;
+  try {
+    file = await readKeyringFile(keyringPath);
+  } catch (e) {
+    io.stderr((e as Error).message);
+    return EXIT_MISCONFIGURED;
+  }
+
+  const passphrase = resolvePassphrase(io);
+  const provider = new PassphraseFileProvider(() => passphrase, undefined, id);
+
+  let updated;
+  try {
+    updated = await addProvider(file, provider, loaded.keys);
+  } catch (e) {
+    io.stderr((e as Error).message);
+    return EXIT_USAGE;
+  }
+
+  await writeKeyringFile(keyringPath, updated);
+  io.info(
+    `securegit: added provider '${id}'\n` +
+      `  action: share the new passphrase with whoever should hold it`,
+  );
+  return EXIT_OK;
+}
+
+/** `key remove-provider <id>` (06-key-provider-port.md). Needs no unlock — it only ever deletes a slot, never re-wraps. */
+async function cmdKeyRemoveProvider(args: string[], io: CliIO): Promise<number> {
+  const id = args.find((a) => !a.startsWith('--'));
+  if (!id) {
+    io.stderr('usage: securegit key remove-provider <id>');
+    return EXIT_USAGE;
+  }
+
+  let config: RepoConfig;
+  try {
+    config = await readConfig(io.cwd);
+  } catch (e) {
+    io.stderr((e as Error).message);
+    return EXIT_MISCONFIGURED;
+  }
+
+  const keyringPath = resolveKeyringPath(config.repoId, io.home);
+  let file;
+  try {
+    file = await readKeyringFile(keyringPath);
+  } catch (e) {
+    io.stderr((e as Error).message);
+    return EXIT_MISCONFIGURED;
+  }
+
+  let updated;
+  try {
+    updated = removeProvider(file, id);
+  } catch (e) {
+    io.stderr((e as Error).message);
+    return EXIT_USAGE;
+  }
+
+  await writeKeyringFile(keyringPath, updated);
+  io.info(`securegit: removed provider '${id}'`);
+  return EXIT_OK;
+}
+
+/**
+ * `key list` (06-key-provider-port.md/10-cli-contract.md): generations,
+ * fingerprints, dates, current marker, and which provider ids can unlock
+ * each. No key required — everything here is keyring metadata, not
+ * anything that needs decrypting, the same reasoning `verify` and `key
+ * export-recovery`'s read side already follow.
+ */
+async function cmdKeyList(args: string[], io: CliIO): Promise<number> {
+  let config: RepoConfig;
+  try {
+    config = await readConfig(io.cwd);
+  } catch (e) {
+    io.stderr((e as Error).message);
+    return EXIT_MISCONFIGURED;
+  }
+
+  let file;
+  try {
+    file = await readKeyringFile(resolveKeyringPath(config.repoId, io.home));
+  } catch (e) {
+    io.stderr((e as Error).message);
+    return EXIT_MISCONFIGURED;
+  }
+
+  if (args.includes('--json')) {
+    writeJson(io, {
+      current: file.current,
+      generations: file.generations.map((g) => ({
+        generation: g.generation,
+        fingerprint: g.fingerprint,
+        createdAt: g.createdAt,
+        providers: g.wrapped.map((w) => w.provider),
+      })),
+    });
+    return EXIT_OK;
+  }
+
+  const lines = file.generations.map((g) => {
+    const marker = g.generation === file.current ? '*' : ' ';
+    const providers = g.wrapped.map((w) => w.provider).join(', ');
+    return `${marker} gen ${g.generation}  ${g.fingerprint}  ${g.createdAt}  providers: ${providers}`;
+  });
+  io.stderr(lines.join('\n'));
+  return EXIT_OK;
+}
+
 async function cmdKey(args: string[], io: CliIO): Promise<number> {
   const [sub, ...rest] = args;
   switch (sub) {
@@ -1040,11 +1217,17 @@ async function cmdKey(args: string[], io: CliIO): Promise<number> {
       return await cmdKeyExportRecovery(rest, io);
     case 'import-recovery':
       return await cmdKeyImportRecovery(rest, io);
+    case 'add-provider':
+      return await cmdKeyAddProvider(rest, io);
+    case 'remove-provider':
+      return await cmdKeyRemoveProvider(rest, io);
+    case 'list':
+      return await cmdKeyList(rest, io);
     default:
       io.stderr(
         sub
           ? `securegit: unknown key subcommand '${sub}'`
-          : 'usage: securegit key <add-recipient|remove-recipient|rotate|export-recovery|import-recovery>',
+          : 'usage: securegit key <add-recipient|remove-recipient|rotate|export-recovery|import-recovery|add-provider|remove-provider|list>',
       );
       return EXIT_USAGE;
   }

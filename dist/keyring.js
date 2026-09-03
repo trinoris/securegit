@@ -223,6 +223,67 @@ export async function rewrapOutdatedGenerations(file, providers, keys) {
     return { file: { ...file, generations }, changed };
 }
 /**
+ * `key add-provider` (06-key-provider-port.md): wraps every generation
+ * for a new provider, alongside whatever already wraps it. Refuses if
+ * `provider.id` already has a slot anywhere in the keyring — `unlockKeyring()`
+ * looks providers up by id, so a second provider sharing one would
+ * silently shadow the first during unlock rather than genuinely offering
+ * an independent way in. Refuses just as hard if `keys` doesn't hold every
+ * generation — a partial add would leave the keyring in a state where the
+ * new provider unlocks some generations but not others, which is worse
+ * than not adding it at all.
+ */
+export async function addProvider(file, provider, keys) {
+    const alreadyPresent = file.generations.some((gen) => gen.wrapped.some((w) => w.provider === provider.id));
+    if (alreadyPresent) {
+        throw new KeyringError(`securegit: a provider with id '${provider.id}' is already wrapped in this keyring\n` +
+            `  action: choose a different id (e.g. a distinct --label)`);
+    }
+    const generations = await Promise.all(file.generations.map(async (gen) => {
+        const keyId = keyIdFor(gen.generation, gen.fingerprint);
+        const rmk = keys.find(keyId);
+        if (!rmk) {
+            throw new KeyringError(`securegit: cannot add a provider — this session does not hold generation ${gen.generation}\n` +
+                `  action: \`securegit unlock\` first, holding every generation`);
+        }
+        const state = await provider.init({ repoId: file.repoId, generation: gen.generation });
+        const wrapped = await provider.wrap(rmk, {
+            repoId: file.repoId,
+            generation: gen.generation,
+            state,
+            interactive: true,
+        });
+        return {
+            ...gen,
+            wrapped: [...gen.wrapped, { provider: wrapped.provider, state, payload: wrapped.payload }],
+        };
+    }));
+    return { ...file, generations };
+}
+/**
+ * `key remove-provider` (06-key-provider-port.md): deletes `id`'s wrapped
+ * slot from every generation. Refuses (per-generation) if doing so would
+ * leave that generation with no provider at all — the last way to unlock
+ * a generation must never be removed — and refuses outright if `id` was
+ * never present anywhere in the keyring.
+ */
+export function removeProvider(file, id) {
+    const everPresent = file.generations.some((gen) => gen.wrapped.some((w) => w.provider === id));
+    if (!everPresent) {
+        throw new KeyringError(`securegit: no provider with id '${id}' found in this keyring`);
+    }
+    const generations = file.generations.map((gen) => {
+        const remaining = gen.wrapped.filter((w) => w.provider !== id);
+        if (remaining.length === gen.wrapped.length)
+            return gen;
+        if (remaining.length === 0) {
+            throw new KeyringError(`securegit: refusing to remove '${id}' — it is the only provider that can unlock generation ${gen.generation}`);
+        }
+        return { ...gen, wrapped: remaining };
+    });
+    return { ...file, generations };
+}
+/**
  * Writes the keyring atomically (temp file + rename, so a crash mid-write
  * cannot leave a half-written file) with mode 0600, creating parent
  * directories as needed.

@@ -29,12 +29,23 @@ const SEP = Buffer.from([0x00]);
  * governs the envelope format does not apply.
  */
 export class PassphraseFileProvider {
-    id = 'passphrase-file';
+    id;
     getPassphrase;
     cost;
-    constructor(getPassphrase, cost = { N: DEFAULT_SCRYPT_N, r: DEFAULT_SCRYPT_R, p: DEFAULT_SCRYPT_P }) {
+    /**
+     * `id` defaults to the provider type's own name, matching every existing
+     * caller that only ever needs one passphrase-file secret. A second,
+     * independent secret on the same keyring (`key add-provider`,
+     * 06-key-provider-port.md) needs its own distinct id — `unlockKeyring()`
+     * looks providers up by `id`, so two instances sharing one would silently
+     * shadow each other during unlock, the same reasoning
+     * `rewrapOutdatedGenerations()` already leans on to compare only
+     * same-provider slots.
+     */
+    constructor(getPassphrase, cost = { N: DEFAULT_SCRYPT_N, r: DEFAULT_SCRYPT_R, p: DEFAULT_SCRYPT_P }, id = 'passphrase-file') {
         this.getPassphrase = getPassphrase;
         this.cost = cost;
+        this.id = id;
     }
     describe() {
         return {

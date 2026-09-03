@@ -14,6 +14,8 @@ import {
   keyringFromRecoveredGenerations,
   unlockKeyring,
   rewrapOutdatedGenerations,
+  addProvider,
+  removeProvider,
   writeKeyringFile,
   readKeyringFile,
   type KeyringFile,
@@ -438,6 +440,127 @@ describe('rewrapOutdatedGenerations()', () => {
     const { file: result, changed } = await rewrapOutdatedGenerations(mixed, [oldProvider], keys);
     expect(changed).toBe(false);
     expect(result.generations[0]!.wrapped[0]).toEqual(foreignSlot);
+  });
+});
+
+// 06-key-provider-port.md: "key add-provider <id>" / "key remove-provider
+// <id>". A `PassphraseFileProvider`'s `id` now takes an explicit third
+// constructor argument for exactly this — `unlockKeyring()` looks
+// providers up by id, so a second independent secret needs one distinct
+// from the first, unlabeled `'passphrase-file'` that `init` always creates.
+describe('addProvider()', () => {
+  it('wraps every generation for the new provider, independently of the existing one', async () => {
+    const original = passphraseProvider();
+    const { file, rmk } = await createKeyring(REPO, [original]);
+    const keys = await unlockKeyring(file, [original]);
+
+    const second = new PassphraseFileProvider(() => 'a second, independent secret!!', FAST_COST, 'passphrase-file:backup');
+    const updated = await addProvider(file, second, keys);
+
+    expect(updated.generations[0]!.wrapped.map((w) => w.provider)).toEqual([
+      'passphrase-file',
+      'passphrase-file:backup',
+    ]);
+
+    // Unlockable via EITHER provider on its own, not just the original.
+    const viaSecond = await unlockKeyring(updated, [second]);
+    expect(viaSecond.current()?.rmk.equals(rmk)).toBe(true);
+    const viaOriginal = await unlockKeyring(updated, [original]);
+    expect(viaOriginal.current()?.rmk.equals(rmk)).toBe(true);
+  });
+
+  it('wraps every generation, not just the current one', async () => {
+    const original = passphraseProvider();
+    const gen1 = await createKeyring(REPO, [original]);
+    const rotated = await rotateKeyring(gen1.file, [original]);
+    const keys = await unlockKeyring(rotated.file, [original]);
+    expect(keys.available()).toHaveLength(2); // both generations held
+
+    const second = new PassphraseFileProvider(() => 'a second, independent secret!!', FAST_COST, 'passphrase-file:backup');
+    const updated = await addProvider(rotated.file, second, keys);
+    expect(updated.generations).toHaveLength(2);
+    for (const gen of updated.generations) {
+      expect(gen.wrapped.map((w) => w.provider)).toContain('passphrase-file:backup');
+    }
+  });
+
+  it('refuses when a provider with the same id is already present', async () => {
+    const original = passphraseProvider(); // id: 'passphrase-file'
+    const { file } = await createKeyring(REPO, [original]);
+    const keys = await unlockKeyring(file, [original]);
+
+    const collidingId = new PassphraseFileProvider(() => 'irrelevant, twelve+ chars', FAST_COST); // same default id
+    await expect(addProvider(file, collidingId, keys)).rejects.toBeInstanceOf(KeyringError);
+  });
+
+  it('refuses when the session does not hold every generation', async () => {
+    const original = passphraseProvider();
+    const gen1 = await createKeyring(REPO, [original]);
+    const rotated = await rotateKeyring(gen1.file, [original]);
+
+    // A KeySource that only ever holds generation 1, not the rotated-to
+    // current generation 2.
+    const partialKeys = await unlockKeyring(gen1.file, [original]);
+
+    const second = new PassphraseFileProvider(() => 'a second, independent secret!!', FAST_COST, 'passphrase-file:backup');
+    await expect(addProvider(rotated.file, second, partialKeys)).rejects.toBeInstanceOf(KeyringError);
+  });
+});
+
+describe('removeProvider()', () => {
+  it("removes the named provider's slot from every generation", () => {
+    const wrapped1 = { provider: 'passphrase-file', state: { N: 1 }, payload: {} };
+    const wrapped2 = { provider: 'passphrase-file:backup', state: { N: 1 }, payload: {} };
+    const file: KeyringFile = {
+      version: 1,
+      repoId: REPO,
+      current: 1,
+      generations: [
+        { generation: 1, fingerprint: 'a1b2c3d4e5f60718', createdAt: new Date().toISOString(), wrapped: [wrapped1, wrapped2] },
+      ],
+    };
+    const updated = removeProvider(file, 'passphrase-file:backup');
+    expect(updated.generations[0]!.wrapped).toEqual([wrapped1]);
+  });
+
+  it('refuses when it would leave a generation with no provider at all', () => {
+    const wrapped1 = { provider: 'passphrase-file', state: { N: 1 }, payload: {} };
+    const file: KeyringFile = {
+      version: 1,
+      repoId: REPO,
+      current: 1,
+      generations: [
+        { generation: 1, fingerprint: 'a1b2c3d4e5f60718', createdAt: new Date().toISOString(), wrapped: [wrapped1] },
+      ],
+    };
+    expect(() => removeProvider(file, 'passphrase-file')).toThrow(KeyringError);
+  });
+
+  it('does not refuse when another provider remains for every generation', () => {
+    const wrapped1 = { provider: 'passphrase-file', state: { N: 1 }, payload: {} };
+    const wrapped2 = { provider: 'passphrase-file:backup', state: { N: 1 }, payload: {} };
+    const file: KeyringFile = {
+      version: 1,
+      repoId: REPO,
+      current: 1,
+      generations: [
+        { generation: 1, fingerprint: 'a1b2c3d4e5f60718', createdAt: new Date().toISOString(), wrapped: [wrapped1, wrapped2] },
+      ],
+    };
+    expect(() => removeProvider(file, 'passphrase-file')).not.toThrow();
+  });
+
+  it('throws when the id was never present', () => {
+    const wrapped1 = { provider: 'passphrase-file', state: { N: 1 }, payload: {} };
+    const file: KeyringFile = {
+      version: 1,
+      repoId: REPO,
+      current: 1,
+      generations: [
+        { generation: 1, fingerprint: 'a1b2c3d4e5f60718', createdAt: new Date().toISOString(), wrapped: [wrapped1] },
+      ],
+    };
+    expect(() => removeProvider(file, 'never-existed')).toThrow(KeyringError);
   });
 });
 

@@ -568,12 +568,28 @@ it triggers mid-stream across several packets, not only against one
 packet already too big on its own.
 
 Every row from the original backlog plan, and both items found outside
-it, are closed. Only the plan's explicitly deferred items remain
-(`key add-provider`/`remove-provider`/`list`/`list-recipients`, refusing
-removal of the last recipient, `padTo`/`bindPath` change-refusal, F13's
-race), each still deferred for the same stated reasons.
+it, were closed. Revisiting `key add-provider`/`remove-provider`/`list` —
+one of the deferred items — turned out less hollow than the original
+framing suggested: with only `passphrase-file` as a real type, "add a
+provider" honestly means "add a second, independent passphrase," which is
+useful now. Needed `PassphraseFileProvider`'s `id` to become an
+instance-level constructor argument, since `unlockKeyring()` looks
+providers up by id. Wiring the CLI surfaced two real things: `key
+add-provider` needs both an already-unlocked session and a brand-new
+passphrase in one call, so the new one comes from stdin, not
+`SECUREGIT_PASSPHRASE` (already spoken for); and `cmdUnlock` always built
+exactly one provider at the unlabeled default id, so a labeled second
+provider could never be reached — fixed with a shared
+`passphraseProvidersFor()` helper that tries the entered passphrase
+against every provider id actually present. This also closed spec 06's
+"removing the last non-custodial provider" row for free.
 
-679 unit tests total, all green; 40 integration tests, all green. TypeScript,
+Only three items remain deferred: refusing removal of the last recipient,
+`padTo`/`bindPath` change-refusal (no primitive exists), and F13's
+concurrent-rotation race. `key list-recipients` remains unbuilt too, a
+separate command from `key list`.
+
+696 unit tests total, all green; 40 integration tests, all green. TypeScript,
 `src/` → `dist/`, unit tests beside the source, matching
 `@trinoris/decision-core`.
 
@@ -582,7 +598,7 @@ race), each still deferred for the same stated reasons.
 | Cryptography | derivations, envelope, padding, known-answer vectors | — |
 | Git integration | clean/smudge/textconv, attributes, filter-process, real-`git` round trip | — |
 | Keys | keyring, passphrase provider, session, identity keypair/encoding, recipient wrap/unwrap, rotation, recovery export/import | — |
-| Tooling | CLI (`init`/`init --pad-to`/`install`/`protect`/`unprotect`/`unlock`/`lock`/`status`/`status --json`/`identity`/`key add-recipient`/`key remove-recipient`/`key rotate`/`reencrypt`/`key export-recovery`/`key import-recovery`/`verify`/`verify --access`/`verify --history`/`verify --json`/`clean`/`smudge`/`textconv`/`merge`/`encrypt`/`decrypt`/`inspect`/`inspect --json`/`filter-process`) | — |
+| Tooling | CLI (`init`/`init --pad-to`/`install`/`protect`/`unprotect`/`unlock`/`lock`/`status`/`status --json`/`identity`/`key add-recipient`/`key remove-recipient`/`key rotate`/`reencrypt`/`key export-recovery`/`key import-recovery`/`key add-provider`/`key remove-provider`/`key list`/`key list --json`/`verify`/`verify --access`/`verify --history`/`verify --json`/`clean`/`smudge`/`textconv`/`merge`/`encrypt`/`decrypt`/`inspect`/`inspect --json`/`filter-process`) | `key list-recipients` |
 
 Ten things worth knowing before reading any spec here. The first three are the
 load-bearing ones; the last two are about scope.

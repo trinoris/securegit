@@ -295,14 +295,19 @@ add-recipient`/`remove-recipient`, and a second path inside `unlock`.
   `unlock`'s ordinary path already uses) and stops there. Persisting a real
   `keyring.json` from a bootstrap means wrapping every recovered generation
   for a brand-new local provider, and `keyring.ts` has no primitive for
-  that shape yet — `createKeyring` only ever creates a fresh generation 1,
-  `rotateKeyring` only ever adds one new generation on top of an existing
-  file. Neither fits "wrap N already-known generations for a provider that
-  has never wrapped any of them before." A session is enough for day-to-day
-  use; re-running `unlock` once a session expires is a small, honest cost
-  until that primitive exists — likely as a natural side effect of building
-  `key add-provider` ([09](09-rotation-recovery.md) territory), which needs
-  the same shape.
+  that shape *wired to this flow* yet — `createKeyring` only ever creates a
+  fresh generation 1, `rotateKeyring` only ever adds one new generation on
+  top of an existing file. This spec previously guessed `key add-provider`
+  would supply the missing primitive as a side effect of getting built —
+  wrong guess, corrected now that it exists (06-key-provider-port.md):
+  `addProvider()` only ever *appends* a provider to generations an
+  *existing* `KeyringFile` already has, which a recipient-only join has
+  none of. The primitive this actually needs already exists elsewhere —
+  `keyringFromRecoveredGenerations()`, built for `key import-recovery`,
+  which genuinely does "wrap N already-known generations for a provider
+  that never wrapped any of them before" — but nothing calls it from this
+  join flow. A session is enough for day-to-day use; re-running `unlock`
+  once a session expires is a small, honest cost until that wiring exists.
 - **`identity init`'s `--label` has no default.** The spec's example labels
   (`laptop`, `desktop`, `ci-build`) are purely descriptive text a human
   chose; inventing one (hostname, a UUID) would be more likely to mislead

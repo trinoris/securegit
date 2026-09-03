@@ -7,17 +7,19 @@ tool which is sometimes a Git filter and sometimes a human interface from
 confusing the two.
 
 **Status: MOSTLY IMPLEMENTED.** `src/cli.ts` covers every command below
-except `key add-provider`/`remove-provider`/`list`/`list-recipients`.
-`unprotect` is implemented ([02](02-git-integration.md)) — `.gitattributes`
-only, `.gitignore` residue entries untouched, forward-only exactly like key
-rotation. `verify` now covers its base form, `--history`, and
-`--access`. `--json` is implemented too, for every command that currently
-exists and produces a report — `status`, `verify` (all three forms), and
-`inspect` — writing the underlying report object straight to stdout via
-`JSON.stringify`, no separate schema to keep in sync with the
-human-readable rendering; `key list`/`list-recipients` are the two commands
-spec 10's own global-flags table names for `--json` that don't exist yet,
-so there is nothing for `--json` to do for them. `identity
+except `key list-recipients`. `key add-provider`, `key remove-provider`
+and `key list` are implemented too now — see the "Key providers" section
+below for what they mean when `passphrase-file` is the only provider type
+that exists. `unprotect` is implemented ([02](02-git-integration.md)) —
+`.gitattributes` only, `.gitignore` residue entries untouched, forward-only
+exactly like key rotation. `verify` now covers its base form, `--history`,
+and `--access`. `--json` is implemented too, for every command that
+currently exists and produces a report — `status`, `verify` (all three
+forms), `inspect`, and now `key list` — writing the underlying report
+object straight to stdout via `JSON.stringify`, no separate schema to keep
+in sync with the human-readable rendering; `key list-recipients` is the
+one command spec 10's own global-flags table names for `--json` that still
+doesn't exist, so there is nothing for `--json` to do for it. `identity
 init`/`show` and `key add-recipient`/`remove-recipient` — the
 multi-recipient join flow — are implemented, including `unlock` bootstrapping
 a session from a recipient file alone when no local keyring exists. `key
@@ -91,6 +93,32 @@ and no command does positional (index-based) parsing that an unconsumed
 for a no-op; every command still just calls `io.info(...)`, unaware of
 whether it's live.
 
+`key add-provider`, `key remove-provider` and `key list` are implemented
+too — see [06](06-key-provider-port.md) for what "add a provider" honestly
+means today, with only `passphrase-file` as a real provider type: a
+second, independently-passphrased secret, given its own id
+(`passphrase-file:<label>`) so it doesn't collide with the unlabeled one
+`init` always creates. Building this surface exposed a real usage
+collision worth calling out explicitly: `key add-provider` needs two
+different things from the operator in one invocation — proof they can
+currently unlock this keyring, and the *new* passphrase to wrap it under —
+and both would naturally read from `SECUREGIT_PASSPHRASE` if nothing
+distinguished them, since `loadKeys()` already treats that variable as a
+filter-time unlock credential ([07](07-unlock-session.md)). Resolved the
+same way `key import-recovery`'s two-secrets-one-command shape already
+does: authenticate via whatever's already unlocked (a session, in the
+ordinary case — `SECUREGIT_PASSPHRASE` is deliberately left unconsulted
+for this specific call, precisely because it's spoken for), and take the
+new passphrase from stdin. `key remove-provider` needs no unlock at all —
+it only ever deletes a wrapped slot, refusing (never re-wrapping) if doing
+so would leave any generation with no provider left to unlock it. `key
+list` needs no key either — generation numbers, fingerprints, creation
+dates, and provider ids are keyring metadata, not anything requiring
+decryption, the same reasoning `verify` and `key export-recovery`'s read
+side already follow; `--json` writes `{current, generations: [{generation,
+fingerprint, createdAt, providers}]}` straight to stdout, matching every
+other report command's convention.
+
 ## Core Principle
 
 > Some of these commands have Git on the other end of the pipe. **stdout is a
@@ -134,10 +162,10 @@ whether it's live.
 | Command | Effect |
 |---|---|
 | `securegit key init` | Generate generation 1 and wrap it. Implied by `init`. |
-| `securegit key list` | Generations, fingerprints, dates, current marker. |
+| `securegit key list [--json]` | Generations, fingerprints, dates, current marker, and which provider ids can unlock each. No key required. |
 | `securegit key rotate [--bind-path] --confirm-recipients <n>` | Add a generation ([09](09-rotation-recovery.md)); wraps it for every provider and every existing recipient. Refuses a dirty working tree, a locked repository (locked is checked first), or a missing/mismatched `--confirm-recipients <n>` — printing the recipient list either way, checked before the dirty-tree refusal. `--bind-path` refuses (exit 4) — not implemented, since `config.ts` has no primitive to update an already-initialised repository's `bindPath`. |
-| `securegit key add-provider <id>` | Wrap every generation with an additional provider. |
-| `securegit key remove-provider <id>` | Refused if it is the last non-custodial provider. |
+| `securegit key add-provider <type> [--label <label>]` | Wrap every generation with an additional provider. `passphrase-file` is the only `<type>` today — this adds a second, independent passphrase, given id `passphrase-file:<label>` so it doesn't collide with the unlabeled one `init` creates. Needs the repository already unlocked; the new passphrase comes from stdin, not `SECUREGIT_PASSPHRASE` (already spoken for as the *current* unlock credential). Refuses (exit 4) a colliding id, an unknown `<type>`, or a session that doesn't hold every generation. |
+| `securegit key remove-provider <id>` | Delete a provider's wrapped slot from every generation. Refused (exit 4) if it is the last provider that can unlock any generation, or if `<id>` was never present. No unlock needed — this only ever deletes, never re-wraps. |
 | `securegit key add-recipient <pubkey> [--label <label>]` | Wraps every generation the caller currently holds for a recipient's public key ([08](08-multi-recipient.md)), writes `.securegit/recipients/<fingerprint>.json`. Refuses a malformed public key or a locked repository. `addedBy` is the caller's own identity fingerprint if `identity init` has been run locally, else blank — not an error, since the caller may only have direct keyring access. |
 | `securegit key remove-recipient <fingerprint>` | Delete the recipient file. Prints the rotation warning — removal alone does not revoke access to generations already shared; that needs `key rotate` + `reencrypt`, both built now. Refuses (exit 4) if no file exists for that fingerprint. Does not yet refuse removing the last recipient. |
 | `securegit key list-recipients` | Fingerprint, label, added-at, added-by, generations covered. |
@@ -152,6 +180,16 @@ persisted local keyring; see [08](08-multi-recipient.md) for why). A machine
 with neither a keyring nor an identity gets a message naming both ways
 forward: `securegit init`, or `securegit identity init` plus asking an
 existing member to run `key add-recipient`.
+
+The local-keyring path tries the entered passphrase against every
+passphrase-file-shaped provider id actually present in the keyring, not
+only the unlabeled default — `key add-provider --label` can add more than
+one — since the caller never says in advance which id their passphrase
+belongs to. Only the one whose passphrase genuinely matches ever succeeds;
+this is what `loadKeys()`'s `SECUREGIT_PASSPHRASE` filter-time source
+([07](07-unlock-session.md)) and `rewrapOutdatedGenerations()`
+([06](06-key-provider-port.md)) both do too, via the same shared
+`passphraseProvidersFor()` helper in `src/cli.ts`.
 
 ### Session
 
@@ -216,7 +254,7 @@ English.
 |---|---|
 | `--repo <path>` | Operate on a repository other than the current directory. Resolved against `cwd` (relative paths work), and stripped from `argv` before per-command parsing so a path value is never mistaken for a positional argument. Can appear before or after the command name. Missing its path argument exits 4. |
 | `--strict` | `smudge` fails rather than passing ciphertext through ([07](07-unlock-session.md)). |
-| `--json` | Machine-readable output for `status`, `verify` (all three forms), and `inspect` — the report object itself, `JSON.stringify`'d, straight to stdout. `key list`/`list-recipients` don't exist yet, so `--json` has nothing to do for them. |
+| `--json` | Machine-readable output for `status`, `verify` (all three forms), `inspect`, and `key list` — the report object itself, `JSON.stringify`'d, straight to stdout. `key list-recipients` doesn't exist yet, so `--json` has nothing to do for it. |
 | `--quiet` | Suppress one-shot success confirmations (`io.info`). Never suppresses errors or a report command's actual report (`status`, `identity show`, `verify`, `inspect`, `reencrypt`, `key export-recovery`'s recovery code) — those stay on `stderr` regardless, same as they were never a stdout writer. |
 | `-v`, `--verbose` | Per-file tracing to stderr, on `clean`/`smudge`/`merge` only. Never includes plaintext, key material, or a passphrase. Parsed like `--strict` — before the `--` separator, not stripped from `argv` globally like `--repo`, so a path beginning with `-` after `--` is never at risk of being mistaken for the flag. |
 
@@ -269,9 +307,9 @@ the rule's own definition, and routing it to stderr uniformly means a script
 can never be surprised by which stream carries which command's output — the
 answer is always "content commands only," not "commands a human is unlikely to
 pipe." `--json` is the escape hatch for a script that wants `status`/
-`inspect`/`verify` output on stdout deliberately, now built for exactly
-those three (`key list`/`list-recipients`, the other two spec 10 names for
-it, don't exist yet).
+`inspect`/`verify`/`key list` output on stdout deliberately, now built for
+all four (`key list-recipients`, the other command spec 10 names for it,
+doesn't exist yet).
 
 ## Output discipline
 
@@ -331,6 +369,13 @@ it, don't exist yet).
 | `key add-recipient` exits locked (1) against a locked repository | `src/cli.test.ts` | — | ✅ |
 | `key add-recipient` exits usage (4) on a malformed public key | `src/cli.test.ts` | — | ✅ |
 | `key remove-recipient` deletes the file, exits usage (4) if it never existed | `src/cli.test.ts` | — | ✅ |
+| `key add-provider` wraps every generation for a second, independent passphrase, unlockable via `unlock` on its own | `src/cli.test.ts` | — | ✅ |
+| `key add-provider` exits usage (4) without `--label`, colliding with the existing unlabeled provider | `src/cli.test.ts` | — | ✅ |
+| `key add-provider` exits locked (1) against a locked repository | `src/cli.test.ts` | — | ✅ |
+| `key add-provider` exits usage (4) for an unknown provider type | `src/cli.test.ts` | — | ✅ |
+| `key remove-provider` deletes a provider's slot; the removed passphrase stops unlocking, the remaining one still works | `src/cli.test.ts` | — | ✅ |
+| `key remove-provider` exits usage (4) removing the only provider a generation has, or an id that was never present | `src/cli.test.ts` | — | ✅ |
+| `key list` / `key list --json` report generations, fingerprints, dates, current marker and provider ids, without needing a key | `src/cli.test.ts` | — | ✅ |
 | End-to-end: a second identity joins via `add-recipient`, `unlock`s with no local keyring, and decrypts | `src/cli.test.ts` | — | ✅ |
 | `unlock` names both `init` and `identity init` when neither a keyring nor an identity exists | `src/cli.test.ts` | — | ✅ |
 | `key rotate` refuses `--bind-path`, a dirty tree, a locked repository, and a missing/mismatched `--confirm-recipients` (locked checked first) | `src/cli.test.ts` | — | ✅ |

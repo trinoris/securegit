@@ -54,10 +54,20 @@ export interface ScryptCost {
  * governs the envelope format does not apply.
  */
 export declare class PassphraseFileProvider implements KeyProvider {
-    readonly id = "passphrase-file";
+    readonly id: string;
     private readonly getPassphrase;
     private readonly cost;
-    constructor(getPassphrase: () => Promise<string> | string, cost?: ScryptCost);
+    /**
+     * `id` defaults to the provider type's own name, matching every existing
+     * caller that only ever needs one passphrase-file secret. A second,
+     * independent secret on the same keyring (`key add-provider`,
+     * 06-key-provider-port.md) needs its own distinct id — `unlockKeyring()`
+     * looks providers up by `id`, so two instances sharing one would silently
+     * shadow each other during unlock, the same reasoning
+     * `rewrapOutdatedGenerations()` already leans on to compare only
+     * same-provider slots.
+     */
+    constructor(getPassphrase: () => Promise<string> | string, cost?: ScryptCost, id?: string);
     describe(): ProviderInfo;
     available(): Promise<boolean>;
     init(ctx: {

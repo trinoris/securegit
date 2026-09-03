@@ -718,13 +718,54 @@ own — the shape that actually matters for an adversary's oversized
 envelope arriving over the real protocol.
 
 Every row from the original backlog plan, and both items found outside
-it, are now closed — nothing 🔲 remains except the plan's explicitly
-deferred items (`key add-provider`/`remove-provider`/`list`/
-`list-recipients`, refusing removal of the last recipient,
-`padTo`/`bindPath` change-refusal, F13's concurrent-rotation race), each
-still deferred for the same stated reasons.
+it, were closed — nothing 🔲 remained except the plan's explicitly
+deferred items, each still deferred for the same stated reasons.
 
-679 unit tests, all green; 40 integration tests, all green. The package is
+Revisiting `key add-provider`/`remove-provider`/`list` — one of those
+deferred items — turned out to expose more real design surface than the
+original "hollow until a second provider exists" framing suggested. With
+only `passphrase-file` as a real type, "add a provider" honestly means
+"add a second, independent passphrase," which is genuinely useful *now*,
+not hollow at all — it just needed `PassphraseFileProvider`'s `id` to
+become an instance-level constructor argument rather than a fixed
+class-level constant, since `unlockKeyring()` looks providers up by id and
+two instances silently sharing one would shadow each other during unlock.
+`addProvider()`/`removeProvider()` (`src/keyring.ts`) wrap or delete a
+slot across every generation a `KeySource` holds, refusing a colliding id
+or a generation that would be left with no provider at all. `key list`
+needed nothing more than reading keyring metadata — no key required.
+
+Wiring the CLI command surfaced two things that had to be worked through,
+not just implemented. First, `key add-provider` needs both an
+already-authenticated session *and* a brand-new passphrase in one
+invocation — both would naturally read `SECUREGIT_PASSPHRASE`, which
+`loadKeys()` already claims as a filter-time unlock credential
+([07](07-unlock-session.md)), so the new passphrase deliberately comes
+from stdin instead, the same two-secrets shape `key import-recovery`
+already established. Second, and more fundamental: `cmdUnlock` always
+constructed exactly one `PassphraseFileProvider` at the unlabeled default
+id, meaning a second, labeled provider's slot could never be reached no
+matter what passphrase was entered — the feature would have been
+unusable via plain `unlock` without fixing this. A new shared
+`passphraseProvidersFor()` helper in `src/cli.ts` enumerates every
+passphrase-file-shaped id actually present in the keyring and tries the
+entered passphrase against all of them; `keySourceFromPassphraseEnv()`
+and `rewrapOutdatedGenerations()` were updated to use the same helper, so
+a second provider is honored consistently everywhere a passphrase
+authenticates locally, not just at `unlock`. This also closed spec 06's
+own "removing the last non-custodial provider is refused" row, which
+turned out to already be exactly what `removeProvider()`'s "would leave a
+generation with no provider at all" check proves, in a world with zero
+custodial providers built.
+
+Only three items remain deferred, each for the same stated reason as
+before: refusing removal of the last recipient, `padTo`/`bindPath`
+change-refusal (no primitive exists to change either post-`init`), and
+F13's concurrent-rotation race (needs a real multi-process harness).
+`key list-recipients` remains unbuilt too — a separate command from the
+`key list` built here, out of scope for this cycle.
+
+696 unit tests, all green; 40 integration tests, all green. The package is
 TypeScript (`src/` → `dist/`, NodeNext, `strict` plus
 `noUncheckedIndexedAccess` and `exactOptionalPropertyTypes`), matching
 `@trinoris/decision-core`. Unit
@@ -736,7 +777,7 @@ tests sit beside the source as `*.test.ts`; integration tests are
 | Cryptography | derivations, envelope, padding, known-answer vectors | — |
 | Git integration | filters, attributes, filter-process, real-`git` round trip | — |
 | Keys | keyring, passphrase provider, session, identity keypair/encoding, recipient wrap/unwrap, rotation, recovery export/import | — |
-| Tooling | CLI (`init`/`init --pad-to`/`install`/`protect`/`unprotect`/`unlock`/`lock`/`status`/`status --json`/`identity`/`key add-recipient`/`key remove-recipient`/`key rotate`/`reencrypt`/`key export-recovery`/`key import-recovery`/`verify`/`verify --access`/`verify --history`/`verify --json`/`clean`/`smudge`/`textconv`/`merge`/`encrypt`/`decrypt`/`inspect`/`inspect --json`/`filter-process`) | — |
+| Tooling | CLI (`init`/`init --pad-to`/`install`/`protect`/`unprotect`/`unlock`/`lock`/`status`/`status --json`/`identity`/`key add-recipient`/`key remove-recipient`/`key rotate`/`reencrypt`/`key export-recovery`/`key import-recovery`/`key add-provider`/`key remove-provider`/`key list`/`key list --json`/`verify`/`verify --access`/`verify --history`/`verify --json`/`clean`/`smudge`/`textconv`/`merge`/`encrypt`/`decrypt`/`inspect`/`inspect --json`/`filter-process`) | `key list-recipients` |
 
 The three things that had to be got right before anything else, because they
 cannot be changed later without breaking every repository already in use, are

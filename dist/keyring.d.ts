@@ -98,6 +98,26 @@ export declare function rewrapOutdatedGenerations(file: KeyringFile, providers: 
     changed: boolean;
 }>;
 /**
+ * `key add-provider` (06-key-provider-port.md): wraps every generation
+ * for a new provider, alongside whatever already wraps it. Refuses if
+ * `provider.id` already has a slot anywhere in the keyring — `unlockKeyring()`
+ * looks providers up by id, so a second provider sharing one would
+ * silently shadow the first during unlock rather than genuinely offering
+ * an independent way in. Refuses just as hard if `keys` doesn't hold every
+ * generation — a partial add would leave the keyring in a state where the
+ * new provider unlocks some generations but not others, which is worse
+ * than not adding it at all.
+ */
+export declare function addProvider(file: KeyringFile, provider: KeyProvider, keys: KeySource): Promise<KeyringFile>;
+/**
+ * `key remove-provider` (06-key-provider-port.md): deletes `id`'s wrapped
+ * slot from every generation. Refuses (per-generation) if doing so would
+ * leave that generation with no provider at all — the last way to unlock
+ * a generation must never be removed — and refuses outright if `id` was
+ * never present anywhere in the keyring.
+ */
+export declare function removeProvider(file: KeyringFile, id: string): KeyringFile;
+/**
  * Writes the keyring atomically (temp file + rename, so a crash mid-write
  * cannot leave a half-written file) with mode 0600, creating parent
  * directories as needed.

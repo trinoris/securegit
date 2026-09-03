@@ -7,12 +7,60 @@ has and the cloud does not. That something differs per user and per machine —
 passphrase today, a TPM on the desktop, a smartcard for the person who travels.
 This is the interface that keeps that choice out of the crypto core.
 
-**Status: IMPLEMENTED — the port and one provider.** `src/provider.ts` (the
-`KeyProvider` interface) and `PassphraseFileProvider` are both built and
-tested. `passphrase-file` remains the only v1 implementation; hardware
-providers (`tpm2`, `piv`, `os-keychain`) sit behind this same port,
-unimplemented, by design — see [00](00-test-plan.md)'s "Deliberately not
-phased" note.
+**Status: IMPLEMENTED — the port, one provider, and the CLI surface to add
+or remove one.** `src/provider.ts` (the `KeyProvider` interface) and
+`PassphraseFileProvider` are both built and tested. `passphrase-file`
+remains the only v1 implementation; hardware providers (`tpm2`, `piv`,
+`os-keychain`) sit behind this same port, unimplemented, by design — see
+[00](00-test-plan.md)'s "Deliberately not phased" note, which no longer
+covers `key add-provider`/`remove-provider`/`list` themselves (those are
+built now, see below), only the hardware provider types they'd otherwise
+have nothing real to add or remove.
+
+`key add-provider`/`remove-provider`/`list` ([10](10-cli-contract.md)) are
+implemented as `addProvider()`/`removeProvider()` in `src/keyring.ts`.
+With only `passphrase-file` as a real type, "add a provider" today
+honestly means "add a second, independent passphrase" — `PassphraseFileProvider`'s
+constructor gained an optional third `id` argument for exactly this (it
+was `readonly id = 'passphrase-file'`, a class-level constant; two
+instances sharing that id would silently shadow one during unlock, since
+`unlockKeyring()` looks providers up by id). `addProvider()` refuses a
+colliding id and refuses unless the caller's `KeySource` holds every
+generation — a partial add would leave the new provider unlocking some
+generations but not others. `removeProvider()` needs no unlock at all,
+since it never re-wraps, only deletes — refused per-generation if doing so
+would leave that generation with no provider able to unlock it, and
+refused outright if the id was never present. `key list` (and its
+`--json` form) needs no key either: generation numbers, fingerprints,
+creation dates and provider ids are keyring metadata, not anything
+requiring decryption.
+
+Wiring `key add-provider` into a real command surfaced a genuine usage
+collision, not just an implementation detail: it needs two different
+things from the operator in one invocation — proof they're currently
+authorized (today, an already-unlocked session), and the *new* passphrase
+to wrap under — and both would naturally read from `SECUREGIT_PASSPHRASE`
+if nothing distinguished them, since `loadKeys()` already treats that
+variable as a filter-time unlock credential ([07](07-unlock-session.md)).
+`cmdKeyAddProvider` in `src/cli.ts` resolves this the same way `key
+import-recovery` already resolves its own two-secrets problem: authenticate
+via whatever's already unlocked, `SECUREGIT_PASSPHRASE` deliberately left
+unconsulted for this one call since it's spoken for, and take the new
+passphrase from stdin instead.
+
+`cmdUnlock` itself needed a small but real change to make any of this
+usable: it used to construct exactly one `PassphraseFileProvider`, always
+at the unlabeled default id, so a labeled backup provider's slot could
+never be reached no matter what passphrase was entered. A new shared
+`passphraseProvidersFor()` helper in `src/cli.ts` enumerates every
+passphrase-file-shaped provider id actually present in the keyring and
+tries the entered passphrase against all of them — the caller never says
+in advance which id their passphrase belongs to, and only the one it
+actually fits ever succeeds. `keySourceFromPassphraseEnv()`
+([07](07-unlock-session.md)) and `rewrapOutdatedGenerations()` (below) now
+share this same helper, so a second provider is honored consistently
+everywhere a passphrase authenticates against the local keyring, not just
+at `unlock`.
 
 `src/provider.conformance.test.ts` is the contract suite this document
 promises: `describe.each` over a `{ name, makeProvider }` registration list
@@ -203,12 +251,19 @@ provider B" and "unlock only the generations a late-joining recipient can
 reach" ([08](08-multi-recipient.md)) the same code path rather than two.
 
 Adding a provider requires an unlock through an existing one — `keyring.ts` has
-no special case for it: an added provider is just another `wrap()` call for
-the current generation, appended to that generation's `wrapped` list.
-Removing the last non-custodial provider is refused. Recipients ([08](08-multi-recipient.md)) are
-a *different* mechanism — they wrap for other people, and live in the repository
-rather than the keyring — but they follow the same rule: a repository must
-always have at least one non-custodial way back in.
+no special case for it: an added provider is just another `wrap()` call,
+appended to `wrapped` — for *every* generation the unlocking `KeySource`
+holds, not only the current one, mirroring `key add-recipient`'s own
+`wrapAllGenerations()`; a provider that could only decrypt the newest
+generation would be a strange kind of backup. Removing the last provider
+that can unlock a given generation is refused, per generation — implemented
+as "removing it would leave that generation with no provider at all", which
+in v1, with zero custodial providers built, is the same check "the last
+non-custodial provider" describes; the distinction becomes real only once
+one exists. Recipients ([08](08-multi-recipient.md)) are a *different*
+mechanism — they wrap for other people, and live in the repository rather
+than the keyring — but they follow the same rule: a repository must always
+have at least one non-custodial way back in.
 
 ## Test Cases
 
@@ -224,7 +279,15 @@ always have at least one non-custodial way back in.
 | Raised scrypt parameters re-wrap on next unlock | `src/keyring.test.ts` | — | ✅ |
 | `available()` never prompts | `src/provider.conformance.test.ts` | — | ✅ |
 | Passphrase under 12 characters is refused at `init` | `src/provider.test.ts` | — | ✅ |
-| Removing the last non-custodial provider is refused | `src/keyring.test.ts` | — | 🔲 |
+| `addProvider()` wraps every generation for the new provider, independently unlockable | `src/keyring.test.ts` | — | ✅ |
+| `addProvider()` wraps every held generation, not just the current one | `src/keyring.test.ts` | — | ✅ |
+| `addProvider()` refuses a colliding provider id | `src/keyring.test.ts` | — | ✅ |
+| `addProvider()` refuses when the session does not hold every generation | `src/keyring.test.ts` | — | ✅ |
+| `removeProvider()` deletes the named slot from every generation | `src/keyring.test.ts` | — | ✅ |
+| Removing the last non-custodial provider is refused | `src/keyring.test.ts` | — | ✅ (`removeProvider()`'s "would leave a generation with no provider at all" check — in v1, with zero custodial providers, the same thing) |
+| `removeProvider()` does not refuse when another provider remains | `src/keyring.test.ts` | — | ✅ |
+| `removeProvider()` throws when the id was never present | `src/keyring.test.ts` | — | ✅ |
+| `key unlock` tries every passphrase-file-shaped provider id present, not only the unlabeled default | `src/cli.test.ts` | — | ✅ |
 | A custodial-only repository is a `verify` finding | `src/verify.test.ts` | — | ✅ |
 | Provider never receives a path or file content | `src/provider.conformance.test.ts` | — | ✅ |
 
