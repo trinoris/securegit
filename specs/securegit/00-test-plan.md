@@ -564,7 +564,68 @@ removed-recipient pre/post-rotation pair, `reencrypt` across a real clone,
 and the remaining small unit-file gaps are still open, left for further
 cycles of the same batch.
 
-637 unit tests, all green; 31 integration tests, all green. The package is
+A second batch closes four more rows from the same list. Two are real-git,
+each in its own isolated repo/home so they can't disturb the shared
+top-level fixture: `core.autocrlf=true` proves a protected path's worktree
+content is byte-identical to what was written — `-text` (written by
+`protect()` on every pattern) overrides autocrlf regardless of the
+setting — and an inherited `* text=auto` rule, written to `.gitattributes`
+before `install`/`protect` ever run, is proven to lose to the protected
+path's own later, more specific `-text` line via a real `git check-attr`
+call, not just by reasoning about file order. Two are small, targeted
+additions to existing unit-test files: `src/install.test.ts` proves
+`install()`'s filter/diff/merge configuration never lands in any tracked,
+committed file (it commits everything `install`/`protect` touch, then
+scans every committed blob for the literal config strings) and that a
+recipient file resolves `filter: unset` under real `git check-attr` even
+against a catch-all `protect('**')` pattern; `src/config.test.ts` proves
+`resolveKeyringPath()` resolves under a real `home`, never under the
+repository, and that `initConfig()` leaves nothing under the repository
+but `.securegit/config.json`.
+
+A third batch closes the last two rows and the whole "prove existing
+behavior against real git" list, except the two items already carved out
+as deliberately deferred (removing the last recipient, and F13's
+concurrent-rotation race — both need infrastructure well beyond a test).
+One new top-level describe block covers a real recipient join, removal,
+rotation and `reencrypt`, end to end: a contractor identity is added as a
+recipient and unlocks once while access is live; after that identity is
+removed and the repository rotated, its already-established local
+session — a cache of a key it was already handed, which removal and
+rotation cannot reach into and erase — still decrypts the blob committed
+before any of that happened; only once `reencrypt` actually moves the
+tracked file to the new generation does decrypting the new ciphertext
+genuinely fail (`--strict` turns the would-be warned passthrough into a
+real exit 3), because that identity's session only ever held the old
+generation and was never refreshed. A new `securegitCapture()` helper
+(`spawnCapture()` gained an optional `stdin` to make it possible) drives
+`smudge` directly against a `git cat-file`-fetched historical blob rather
+than via clone/checkout — simpler than the earlier "second identity joins"
+block's real-push-and-pull setup, and sufficient here since the property
+under test is about session state, not push/pull mechanics.
+
+Cycle 11 ([07](07-unlock-session.md)'s remaining rows) turned up three
+already-proven claims and one real gap, not four missing tests. "`rotate`
+invalidates the existing session" and "`status` exit codes are 0/1/2" were
+both already fully proven — the first by `key rotate`'s own "adds a
+generation, keeps the old one, and invalidates the session" test in
+`src/cli.test.ts` (asserting `status` exits locked immediately after
+rotate), the second by three separate existing `src/cli.test.ts` tests, one
+per code — both spec rows were corrected to point at the tests that already
+cover them rather than duplicated. "Filter writes no diagnostics to
+stdout" got one real addition: `clean`'s locked-failure test in
+`src/cli.test.ts` now also asserts zero stdout writes — the claim belongs
+at the CLI-wiring layer, not `filter.ts` itself, which has no stdout
+concept to test at all (it returns a `Buffer` or throws). The fourth,
+"env-var sources are honoured in the documented precedence," turned out to
+be untestable because it is unbuilt: spec 07's "Non-interactive unlock"
+table documents `SECUREGIT_SESSION_KEY` and `SECUREGIT_IDENTITY_FILE` as
+filter-time key sources, but `loadKeys()` only ever reads the session
+file — `SECUREGIT_PASSPHRASE` is wired, but only for the *interactive*
+`init`/`unlock`/`identity init` prompt fallback, a different thing.
+Flagged in spec 07 rather than silently tested around or silently struck.
+
+641 unit tests, all green; 40 integration tests, all green. The package is
 TypeScript (`src/` → `dist/`, NodeNext, `strict` plus
 `noUncheckedIndexedAccess` and `exactOptionalPropertyTypes`), matching
 `@trinoris/decision-core`. Unit

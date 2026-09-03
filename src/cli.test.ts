@@ -668,11 +668,12 @@ describe('clean / smudge', () => {
     await h.run(['unlock']);
   }
 
-  it('clean fails with exit 1 while locked', async () => {
+  it('clean fails with exit 1 while locked, writing the diagnostic to stderr only, nothing to stdout', async () => {
     const h = harness();
     await h.run(['init']);
     expect(await h.run(['clean', '--', PATH], { stdin: PT })).toBe(1);
     expect(h.stderrText()).toContain(PATH);
+    expect(h.stdoutCalls()).toBe(0);
   });
 
   it('clean encrypts once unlocked', async () => {

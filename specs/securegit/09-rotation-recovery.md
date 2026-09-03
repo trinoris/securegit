@@ -359,7 +359,7 @@ that is out of scope for this pass.
 | Blobs from every generation decrypt after two rotations | `src/git.integration.test.ts` | `repo-protected/` | ✅ |
 | `reencrypt --dry-run` stages nothing | `src/cli.test.ts` | `repo-protected/` | ✅ |
 | `reencrypt` moves a protected file to `current`, staged not committed | `src/cli.test.ts` | — | ✅ |
-| `reencrypt` moves every protected file to `current` across a real clone | `src/git.integration.test.ts` | `repo-protected/` | 🔲 |
+| `reencrypt` moves every protected file to `current` across a real clone | `src/git.integration.test.ts` | `repo-protected/` | ✅ |
 | `reencrypt` leaves history untouched | `src/cli.test.ts` | — | ✅ |
 | `reencrypt` is a no-op when everything is current | `src/cli.test.ts` | — | ✅ |
 | `reencrypt` exits locked when the repository is locked | `src/cli.test.ts` | — | ✅ |

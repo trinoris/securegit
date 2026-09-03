@@ -211,15 +211,15 @@ rather than mysterious.
 | `install` writes `required = true` | `src/install.test.ts` | — | ✅ |
 | Filter exiting non-zero aborts `git add` rather than storing plaintext | `src/git.integration.test.ts` | `repo-protected/` | ✅ |
 | `install` writes `-text` on every protected pattern | `src/install.test.ts` | — | ✅ |
-| Round-trip survives `core.autocrlf=true` | `src/git.integration.test.ts` | `repo-protected/` | 🔲 |
-| Round-trip survives an inherited `* text` attribute | `src/git.integration.test.ts` | `attributes/` | 🔲 |
+| Round-trip survives `core.autocrlf=true` | `src/git.integration.test.ts` | `repo-protected/` | ✅ |
+| Round-trip survives an inherited `* text` attribute | `src/git.integration.test.ts` | `attributes/` | ✅ |
 | `.securegit/**` exclusion is present and last | `src/install.test.ts` | — | ✅ |
 | `clean` runs during `git pull` as a pre-merge safety check, and fails closed when locked (F21) | `src/git.integration.test.ts` | — | ✅ |
 | Filter never opens the path given by `%f` | `src/filter.test.ts` | — | ✅ |
 | A path beginning with `-` is filtered correctly | `src/filter.test.ts` | — | ✅ |
 | `install` writes `cachetextconv = false` | `src/install.test.ts` | — | ✅ |
 | `install` run twice changes nothing the second time | `src/install.test.ts` | — | ✅ |
-| `install` refuses to write filter config into a committed file | `src/install.test.ts` | — | 🔲 |
+| `install` refuses to write filter config into a committed file | `src/install.test.ts` | — | ✅ (`install()` only ever writes local, uncommittable git config by construction; proved by committing everything `install`/`protect` touch and scanning every committed blob for the config strings) |
 
 ## Relationship to Other Specs
 

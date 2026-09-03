@@ -143,7 +143,7 @@ belong in this repository at all.
 | A bundle of the repo decrypts to nothing without the key | `src/git.integration.test.ts` | `repo-protected/` | ✅ |
 | Clone by a keyless third party yields ciphertext in the worktree | `src/git.integration.test.ts` | `repo-protected/` | ✅ |
 | Removing the `.gitattributes` line is reported by `verify` | `src/verify.test.ts` | `attributes/` | ✅ |
-| Session cache and keyring are never written inside the repo | `src/config.test.ts` | — | 🔲 |
+| Session cache and keyring are never written inside the repo | `src/config.test.ts` | — | ✅ |
 
 ## Relationship to Other Specs
 

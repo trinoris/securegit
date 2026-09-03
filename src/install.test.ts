@@ -141,6 +141,38 @@ describe('install()', () => {
     }
   });
 
+  it('never writes its filter/diff/merge configuration into any tracked, committed file', async () => {
+    // `install()` only ever writes local (`.git/config`) scope — never
+    // committed, by construction, since `.git` itself can never be tracked
+    // inside its own working tree. This proves that end to end: everything
+    // install/protect touch or could touch gets committed, then every
+    // committed blob is checked for the literal command strings install()
+    // writes to git config.
+    await install({ repoDir: dir });
+    await protect(dir, ['config/production.json']);
+    await writeFile(join(dir, 'README.md'), '# example repo\n', 'utf8');
+    await git(dir, ['add', '-A']);
+    await git(dir, [
+      '-c',
+      'user.name=Test',
+      '-c',
+      'user.email=test@example.com',
+      'commit',
+      '--quiet',
+      '-m',
+      'init',
+    ]);
+
+    const tracked = (await git(dir, ['ls-files'])).split('\n').filter(Boolean);
+    expect(tracked.length).toBeGreaterThan(0);
+    for (const path of tracked) {
+      const content = (await execFile('git', ['show', `HEAD:${path}`], { cwd: dir })).stdout;
+      expect(content).not.toContain('filter.securegit');
+      expect(content).not.toContain('securegit clean');
+      expect(content).not.toContain('securegit smudge');
+    }
+  });
+
   describe('foreign configuration (T10)', () => {
     it('refuses to overwrite a filter.securegit.clean it did not write', async () => {
       await git(dir, ['config', '--local', 'filter.securegit.clean', 'some-other-tool --encrypt']);
@@ -247,6 +279,20 @@ describe('protect()', () => {
     expect(content).toContain('.env filter=securegit diff=securegit merge=securegit -text');
     expect(content).toContain('*.secret filter=securegit diff=securegit merge=securegit -text');
     expect(content).toContain('config/production.* filter=securegit diff=securegit merge=securegit -text');
+  });
+
+  it('recipient files are never filtered, even under a catch-all protect pattern', async () => {
+    // The exclusion line is written last (asserted above), which is what
+    // makes it win over even the broadest possible pattern — proved here
+    // against real git attribute resolution, not just the file's line order.
+    await protect(dir, ['**']);
+    const check = await git(dir, [
+      'check-attr',
+      'filter',
+      '--',
+      '.securegit/recipients/deadbeef.json',
+    ]);
+    expect(check).toContain('filter: unset');
   });
 
   describe('residue .gitignore entries (T12)', () => {

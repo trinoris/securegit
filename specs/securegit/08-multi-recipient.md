@@ -386,9 +386,9 @@ add-recipient`/`remove-recipient`, and a second path inside `unlock`.
 | F21: a locked repository with the filter attached cannot `git pull` | `src/git.integration.test.ts` | — | ✅ |
 | `remove-recipient` deletes the file and warns about history | `src/cli.test.ts` | — | ✅ |
 | `remove-recipient` records the removal in the committed removed-recipients log | `src/cli.test.ts`, `src/recipients.test.ts` | — | ✅ |
-| Removed recipient can still read pre-rotation blobs | `src/git.integration.test.ts` | `identities/` | 🔲 |
-| Removed recipient cannot read post-rotation blobs | `src/git.integration.test.ts` | `identities/` | 🔲 |
-| Recipient files are never filtered | `src/install.test.ts` | — | 🔲 |
+| Removed recipient can still read pre-rotation blobs | `src/git.integration.test.ts` | `identities/` | ✅ |
+| Removed recipient cannot read post-rotation blobs | `src/git.integration.test.ts` | `identities/` | ✅ |
+| Recipient files are never filtered | `src/install.test.ts` | — | ✅ |
 | Removing the last recipient is refused | `src/recipients.test.ts` | — | 🔲 |
 
 ## Relationship to Other Specs

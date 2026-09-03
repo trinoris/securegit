@@ -475,7 +475,40 @@ in the same batch — `core.autocrlf`/inherited-attribute round-trips,
 removed-recipient pre/post-rotation reads, `reencrypt` across a real clone,
 and a few small unit-file gaps — are left for further cycles.
 
-637 unit tests total, all green; 31 integration tests, all green. TypeScript,
+A second batch closes four more: `core.autocrlf=true` and an inherited
+`* text=auto` rule each get their own isolated real-git repo, proving
+`protect()`'s `-text` wins in both cases (against real `git check-attr` for
+the attribute case, not just file order); `src/install.test.ts` proves
+`install()`'s config never lands in a committed file and that a recipient
+file resolves `filter: unset` even under `protect('**')`; `src/config.test.ts`
+proves `resolveKeyringPath()` resolves under `home` and that `initConfig()`
+leaves nothing under the repository but `.securegit/config.json`.
+
+A third batch closes the last two rows and the whole "prove existing
+behavior against real git" list, except two items already deliberately
+deferred (removing the last recipient, F13's concurrent-rotation race — both
+need infrastructure well beyond a test). One describe block covers a real
+recipient join, removal, rotation and `reencrypt` end to end: a contractor
+identity unlocks once while access is live, then keeps decrypting the
+pre-rotation blob after being removed and the repo rotated — an
+already-established session is a cache of a key already handed over, which
+removal can't reach into and erase — and only loses that ability once
+`reencrypt` actually moves the file to a generation it was never wrapped
+for. A new `securegitCapture()` helper drives `smudge` against a `git
+cat-file`-fetched historical blob directly, simpler than a full clone/pull.
+
+Cycle 11 ([07](07-unlock-session.md)'s remaining rows) found three
+already-proven claims, not missing tests — "`rotate` invalidates the
+existing session" and "`status` exit codes are 0/1/2" each got their spec
+row corrected to point at existing `src/cli.test.ts` tests that already
+cover them — plus one real addition (`clean`'s locked-failure test now
+also asserts zero stdout writes) and one real, flagged gap: spec 07's
+`SECUREGIT_SESSION_KEY`/`SECUREGIT_IDENTITY_FILE` non-interactive unlock
+sources were never built — only the session file and (for interactive
+commands only) `SECUREGIT_PASSPHRASE` exist. Documented in spec 07 rather
+than silently tested around.
+
+641 unit tests total, all green; 40 integration tests, all green. TypeScript,
 `src/` → `dist/`, unit tests beside the source, matching
 `@trinoris/decision-core`.
 

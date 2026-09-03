@@ -43,7 +43,7 @@ const GIT_ENV = (home: string): NodeJS.ProcessEnv => ({
 async function spawnCapture(
   cmd: string,
   args: string[],
-  opts: { cwd: string; env: NodeJS.ProcessEnv },
+  opts: { cwd: string; env: NodeJS.ProcessEnv; stdin?: Buffer },
 ): Promise<{ stdout: Buffer; stderr: string }> {
   return new Promise((resolve, reject) => {
     const child = spawn(cmd, args, { cwd: opts.cwd, env: opts.env });
@@ -57,7 +57,7 @@ async function spawnCapture(
       if (code === 0) resolve({ stdout: Buffer.concat(outChunks), stderr });
       else reject(new Error(`${cmd} ${args.join(' ')} exited ${code}: ${stderr}`));
     });
-    child.stdin.end();
+    child.stdin.end(opts.stdin);
   });
 }
 
@@ -76,6 +76,21 @@ async function securegit(repoDir: string, home: string, args: string[]): Promise
     cwd: repoDir,
     env: { PATH: process.env.PATH, HOME: home, SECUREGIT_PASSPHRASE: PASSPHRASE },
   });
+}
+
+/** Like `securegit()`, but for a filter subcommand — feeds `stdin` and returns the real stdout. */
+async function securegitCapture(
+  repoDir: string,
+  home: string,
+  args: string[],
+  stdin: Buffer,
+): Promise<Buffer> {
+  const { stdout } = await spawnCapture('node', [BIN, ...args], {
+    cwd: repoDir,
+    env: { PATH: process.env.PATH, HOME: home, SECUREGIT_PASSPHRASE: PASSPHRASE },
+    stdin,
+  });
+  return stdout;
 }
 
 async function initRepo(repoDir: string, home: string): Promise<void> {
@@ -686,5 +701,195 @@ describe('a real Git repository with padding enabled (init --pad-to)', () => {
     expect(diff).toContain('-{}');
     expect(diff).toContain('+{"changed":true}');
     await git(dir, home, ['checkout', '--', PADDED_PATH]); // restore
+  });
+});
+
+// A separate top-level describe, own repo/home: `protect()` writes `-text`
+// on every pattern it adds (02-git-integration.md) specifically so a
+// protected path is immune to line-ending conversion regardless of what
+// `core.autocrlf` is set to — this proves that against a real git process,
+// not just that the attribute string is correct.
+describe('a real Git repository with core.autocrlf=true', () => {
+  let dir: string;
+  let home: string;
+
+  beforeAll(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'securegit-git-autocrlf-repo-'));
+    home = await mkdtemp(join(tmpdir(), 'securegit-git-autocrlf-home-'));
+
+    await git(dir, home, ['init', '--quiet', '-b', 'main']);
+    await git(dir, home, ['config', 'user.name', 'Test']);
+    await git(dir, home, ['config', 'user.email', 'test@example.com']);
+    await git(dir, home, ['config', 'core.autocrlf', 'true']);
+    await securegit(dir, home, ['init']);
+    await securegit(dir, home, ['install', '--bin', FILTER_BIN]);
+    await securegit(dir, home, ['protect', PROTECTED_PATH]);
+    await securegit(dir, home, ['unlock']);
+
+    await mkdir(join(dir, 'config'), { recursive: true });
+    await writeFile(join(dir, PROTECTED_PATH), PLAINTEXT); // plain \n line endings, deliberately
+    await git(dir, home, ['add', '-A']);
+    await git(dir, home, ['commit', '--quiet', '-m', 'add production config']);
+  }, 30_000);
+
+  afterAll(async () => {
+    await rm(dir, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  });
+
+  it('git status is clean with autocrlf enabled', async () => {
+    expect(await git(dir, home, ['status', '--porcelain'])).toBe('');
+  });
+
+  it('the worktree file is exactly the original plaintext — no CRLF conversion applied', async () => {
+    const content = await readFile(join(dir, PROTECTED_PATH));
+    expect(content.equals(PLAINTEXT)).toBe(true);
+  });
+
+  it('the committed blob is still ciphertext', async () => {
+    const blob = await gitBuffer(dir, home, ['cat-file', '-p', `HEAD:${PROTECTED_PATH}`]);
+    expect(blob.subarray(0, MAGIC.length).equals(MAGIC)).toBe(true);
+    expect(blob.includes(Buffer.from('hunter2'))).toBe(false);
+  });
+});
+
+// A separate top-level describe, own repo/home: proves that a protected
+// path's own `-text` (and filter=/diff=/merge=securegit) still wins even
+// when a broader, pre-existing rule already claims `* text` ahead of it —
+// the scenario "inherited" describes (some other convention or tool wrote
+// `.gitattributes` first). `protect()` always appends, so its own line
+// comes later and, within one file, a later line wins over an earlier one
+// for the same attribute (02-git-integration.md).
+describe('a real Git repository with an inherited `* text` attribute', () => {
+  let dir: string;
+  let home: string;
+
+  beforeAll(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'securegit-git-inherited-text-repo-'));
+    home = await mkdtemp(join(tmpdir(), 'securegit-git-inherited-text-home-'));
+
+    await git(dir, home, ['init', '--quiet', '-b', 'main']);
+    await git(dir, home, ['config', 'user.name', 'Test']);
+    await git(dir, home, ['config', 'user.email', 'test@example.com']);
+    await writeFile(join(dir, '.gitattributes'), '* text=auto\n', 'utf8');
+    await securegit(dir, home, ['init']);
+    await securegit(dir, home, ['install', '--bin', FILTER_BIN]);
+    await securegit(dir, home, ['protect', PROTECTED_PATH]);
+    await securegit(dir, home, ['unlock']);
+
+    await mkdir(join(dir, 'config'), { recursive: true });
+    await writeFile(join(dir, PROTECTED_PATH), PLAINTEXT);
+    await git(dir, home, ['add', '-A']);
+    await git(dir, home, ['commit', '--quiet', '-m', 'add production config']);
+  }, 30_000);
+
+  afterAll(async () => {
+    await rm(dir, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  });
+
+  it("the protected path resolves text: unset, overriding the inherited `* text=auto`", async () => {
+    const check = await git(dir, home, ['check-attr', 'text', '--', PROTECTED_PATH]);
+    expect(check).toContain('text: unset');
+  });
+
+  it('git status is clean and the committed blob is ciphertext', async () => {
+    expect(await git(dir, home, ['status', '--porcelain'])).toBe('');
+    const blob = await gitBuffer(dir, home, ['cat-file', '-p', `HEAD:${PROTECTED_PATH}`]);
+    expect(blob.subarray(0, MAGIC.length).equals(MAGIC)).toBe(true);
+  });
+
+  it('the worktree file reads back as the exact original plaintext', async () => {
+    const content = await readFile(join(dir, PROTECTED_PATH));
+    expect(content.equals(PLAINTEXT)).toBe(true);
+  });
+});
+
+// A separate top-level describe, own repo/home(s): the remaining two rows
+// from the removed-recipient / rotation batch (08-multi-recipient.md,
+// 09-rotation-recovery.md), against real git and the real binary — a
+// removed recipient keeps whatever they could already decrypt (removal
+// can't reach into an already-unlocked session and erase a key from it),
+// and loses read access only once `reencrypt` actually moves a blob to a
+// generation they were never wrapped for.
+describe('a removed recipient across a real rotation and reencrypt', () => {
+  let dir: string;
+  let home: string;
+  let homeR: string; // the recipient's own home/identity/session
+  let recipientFingerprint: string;
+  let preRotationCiphertext: Buffer;
+
+  beforeAll(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'securegit-git-rotate-recipient-repo-'));
+    home = await mkdtemp(join(tmpdir(), 'securegit-git-rotate-recipient-home-'));
+    homeR = await mkdtemp(join(tmpdir(), 'securegit-git-rotate-recipient-r-'));
+
+    await git(dir, home, ['init', '--quiet', '-b', 'main']);
+    await git(dir, home, ['config', 'user.name', 'Test']);
+    await git(dir, home, ['config', 'user.email', 'test@example.com']);
+    await securegit(dir, home, ['init']);
+    await securegit(dir, home, ['install', '--bin', FILTER_BIN]);
+    await securegit(dir, home, ['protect', PROTECTED_PATH]);
+    await securegit(dir, home, ['unlock']);
+
+    await mkdir(join(dir, 'config'), { recursive: true });
+    await writeFile(join(dir, PROTECTED_PATH), PLAINTEXT);
+    await git(dir, home, ['add', '-A']);
+    await git(dir, home, ['commit', '--quiet', '-m', 'add production config']);
+    preRotationCiphertext = await gitBuffer(dir, home, ['cat-file', '-p', `HEAD:${PROTECTED_PATH}`]);
+
+    // A contractor identity, added as a recipient sharing generation 1, and
+    // unlocked once while access is live.
+    await securegit(dir, homeR, ['identity', 'init', '--label', 'contractor']);
+    const identity = JSON.parse(
+      await readFile(join(homeR, '.securegit', 'identity.json'), 'utf8'),
+    ) as { publicKey: string; fingerprint: string };
+    recipientFingerprint = identity.fingerprint;
+    await securegit(dir, home, ['key', 'add-recipient', identity.publicKey, '--label', 'contractor']);
+    await git(dir, home, ['add', '.securegit/recipients']);
+    await git(dir, home, ['commit', '--quiet', '-m', 'add contractor as a recipient']);
+    await securegit(dir, homeR, ['unlock']);
+  }, 30_000);
+
+  afterAll(async () => {
+    await rm(dir, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+    await rm(homeR, { recursive: true, force: true });
+  });
+
+  it('the recipient can decrypt the blob committed before removal', async () => {
+    const out = await securegitCapture(dir, homeR, ['smudge', '--', PROTECTED_PATH], preRotationCiphertext);
+    expect(out.equals(PLAINTEXT)).toBe(true);
+  });
+
+  it('after removal and rotation, the recipient can still decrypt the pre-rotation blob', async () => {
+    await securegit(dir, home, ['key', 'remove-recipient', recipientFingerprint]);
+    await git(dir, home, ['add', '.securegit/recipients', '.securegit/removed-recipients.json']);
+    await git(dir, home, ['commit', '--quiet', '-m', 'remove contractor']);
+    await securegit(dir, home, ['key', 'rotate', '--confirm-recipients', '0']);
+    await securegit(dir, home, ['unlock']);
+
+    // The contractor's session was established before removal and rotation
+    // — a local cache of a key already handed over, which removing the
+    // recipient entry and rotating the repository cannot reach into and
+    // erase.
+    const out = await securegitCapture(dir, homeR, ['smudge', '--', PROTECTED_PATH], preRotationCiphertext);
+    expect(out.equals(PLAINTEXT)).toBe(true);
+  });
+
+  it('reencrypt moves the tracked file to the new generation, which the removed recipient cannot decrypt', async () => {
+    await securegit(dir, home, ['reencrypt']);
+    const postRotationCiphertext = await gitBuffer(dir, home, ['cat-file', '-p', `:${PROTECTED_PATH}`]);
+    expect(postRotationCiphertext.equals(preRotationCiphertext)).toBe(false);
+
+    // The contractor's session only ever held generation 1 — it was
+    // written before rotation and never refreshed — so the new
+    // generation's ciphertext is one this keyring genuinely lacks.
+    // `--strict` turns that into a real failure instead of a warned
+    // passthrough (10-cli-contract.md: exit 3, "a generation the keyring
+    // lacks").
+    await expect(
+      securegitCapture(dir, homeR, ['smudge', '--strict', '--', PROTECTED_PATH], postRotationCiphertext),
+    ).rejects.toThrow();
   });
 });

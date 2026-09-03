@@ -7,10 +7,18 @@ already committed to carrying file content. There is nowhere to prompt for a
 passphrase. This spec is how the key gets to the filter anyway, and what the
 filter does when it does not.
 
-**Status: IMPLEMENTED.** `src/session.ts` (the cache, TTL and permission
-hardening) and the clean/smudge asymmetry in `src/filter.ts` are both built
-and tested, including end to end against real `git` in
-`src/git.integration.test.ts`.
+**Status: IMPLEMENTED**, with one documented gap. `src/session.ts` (the
+cache, TTL and permission hardening) and the clean/smudge asymmetry in
+`src/filter.ts` are both built and tested, including end to end against
+real `git` in `src/git.integration.test.ts`. The "Non-interactive unlock"
+table below documents four precedence-ordered sources for the filter's key
+lookup; only the bottom one (the session file) and `SECUREGIT_PASSPHRASE`
+(which is wired for the *interactive* `init`/`unlock`/`identity init`
+prompt fallback, not as a filter-time session source) actually exist.
+`SECUREGIT_SESSION_KEY` and `SECUREGIT_IDENTITY_FILE` are unbuilt —
+`loadKeys()` in `src/cli.ts`, which every filter command goes through,
+reads only the session file. Flagged here rather than silently tested
+around or silently struck from the spec — see the Test Cases table.
 
 ## Core Principle
 
@@ -242,13 +250,13 @@ shown above are not built — `status` stays a cheap, session-only read
 | Session file with mode `0644` is deleted, not used | `src/session.test.ts` | — | ✅ |
 | Expired session is unlinked and treated as locked | `src/session.test.ts` | — | ✅ |
 | `lock` removes the session file | `src/session.test.ts` | — | ✅ |
-| `rotate` invalidates the existing session | `src/session.test.ts` | — | 🔲 |
+| `rotate` invalidates the existing session | `src/cli.test.ts` | — | ✅ (`key rotate`'s own "adds a generation, keeps the old one, and invalidates the session" test — `status` exits locked (1) immediately after rotate, before a fresh `unlock`; `lockSession()`'s generic unlink behavior, which this literally calls, is separately proven in `src/session.test.ts`) |
 | `$XDG_RUNTIME_DIR` is preferred when set and writable | `src/session.test.ts` | — | ✅ |
 | TTL above the cap is clamped | `src/session.test.ts` | — | ✅ |
-| Env-var sources are honoured in the documented precedence | `src/session.test.ts` | — | 🔲 |
+| Env-var sources are honoured in the documented precedence | `src/session.test.ts` | — | 🔲 (only `SECUREGIT_PASSPHRASE` is implemented, for the interactive `init`/`unlock`/`identity init` prompt fallback — `SECUREGIT_SESSION_KEY` and `SECUREGIT_IDENTITY_FILE` as non-interactive sources for the filter's own key lookup, documented above, were never built; `loadKeys()` in `src/cli.ts` only ever reads the session file. This is a real feature gap, not a missing test — see the project's owner for how to prioritize it) |
 | No filter code path calls a provider with `interactive: true` | `src/filter.test.ts` | — | ✅ |
-| Filter writes no diagnostics to stdout, only stderr | `src/filter.test.ts` | — | 🔲 |
-| `status` exit codes are 0 / 1 / 2 as specified | `src/cli.test.ts` | — | 🔲 |
+| Filter writes no diagnostics to stdout, only stderr | `src/cli.test.ts` | — | ✅ (`clean`'s locked-failure test now also asserts zero stdout writes; `filter.ts` itself has no stdout concept to test — it returns a `Buffer` or throws, never writes anywhere, which is what `src/filter.test.ts`'s "`clean` without a key exits non-zero and writes nothing to stdout" row above already covers at that layer) |
+| `status` exit codes are 0 / 1 / 2 as specified | `src/cli.test.ts` | — | ✅ (three separate existing tests: "status exits 2 before init", "status exits 1 (locked) after init but before unlock", "unlock exits 0 with the right passphrase, status then exits 0") |
 | Committing an unsmudged ciphertext file does not double-encrypt | `src/git.integration.test.ts` | `repo-protected/` | ✅ |
 
 ## Relationship to Other Specs

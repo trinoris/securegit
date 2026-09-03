@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, rm, mkdir, stat, readFile, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, mkdir, stat, readFile, writeFile, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -130,6 +130,26 @@ describe('initConfig()', () => {
     const raw = await readFile(configPath(dir), 'utf8');
     expect(() => JSON.parse(raw)).not.toThrow();
     expect(raw).toContain('"repoId"');
+  });
+});
+
+describe('the session cache and keyring are never written inside the repository', () => {
+  it("resolveKeyringPath() resolves under home, never under the repository's own directory", async () => {
+    const config = await initConfig(dir);
+    const home = await mkdtemp(join(tmpdir(), 'securegit-config-home-'));
+    try {
+      const keyringPath = resolveKeyringPath(config.repoId, home);
+      expect(keyringPath.startsWith(dir)).toBe(false);
+      expect(keyringPath.startsWith(home)).toBe(true);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  it('initConfig() writes nothing under the repository but .securegit/config.json', async () => {
+    await initConfig(dir);
+    expect((await readdir(dir)).sort()).toEqual(['.git', '.securegit']);
+    expect(await readdir(join(dir, '.securegit'))).toEqual(['config.json']);
   });
 });
 
