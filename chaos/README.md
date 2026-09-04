@@ -62,7 +62,7 @@ and the three hard invariants as gauges that resolve once the match ends.
 ### Published automatically: GitHub Pages
 
 `.github/workflows/node.js.yml`'s `chaos` job runs the sandbox nightly
-(03:00 UTC) and on manual dispatch (Actions tab → "Node.js CI" → "Run
+(03:00 UTC) and on manual dispatch (Actions tab → "Build CI" → "Run
 workflow"), extracts `report.jsonl` and `verifier-result.json`, and
 deploys them alongside a copy of the viewer as a GitHub Pages site — the
 viewer's `tryLoadPublishedRun()` fetches those same-directory files at
