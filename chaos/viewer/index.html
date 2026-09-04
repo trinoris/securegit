@@ -1009,9 +1009,66 @@
     loadEvents(generateDemo(), { label: 'demo match', autoplay: true });
   });
 
+  // ---------- auto-load a published run, if this page was deployed
+  // alongside one (see .github/workflows/node.js.yml's `chaos` job) ----------
+
+  async function fetchJsonSibling(name, asText) {
+    try {
+      const res = await fetch('./' + name, { cache: 'no-store' });
+      if (!res.ok) return null;
+      return asText ? await res.text() : await res.json();
+    } catch (e) {
+      // No server (a plain double-clicked file), no sibling file, or a
+      // network hiccup — all equally "nothing to load", not an error to
+      // surface. Falls through to the demo below.
+      return null;
+    }
+  }
+
+  async function tryLoadPublishedRun() {
+    var reportText = await fetchJsonSibling('report.jsonl', true);
+    var result = await fetchJsonSibling('verifier-result.json', false);
+    if (!reportText && !result) return false;
+
+    if (reportText) {
+      var events = parseJsonl(reportText);
+      if (events.length > 0) {
+        loadEvents(events, { label: 'latest published run', live: true, replayOnly: !result, autoplay: true });
+      } else if (result) {
+        showSnapshot(result);
+      } else {
+        return false;
+      }
+    } else {
+      showSnapshot(result);
+    }
+
+    if (reportText && result) {
+      // The verifier's own audit is authoritative — overrides whatever the
+      // replay-only guess above could tell (only ever the data-recovery
+      // gauge; see specs/chaotests/02-viewer.md's "Two input shapes, two
+      // views"). Set immediately rather than waiting for playback to
+      // reach the end, since this is a status page people check quickly.
+      var inv = result.invariants || {};
+      var audit = {
+        plaintext: inv.noPlaintextLeaked ? 'secure' : 'breach',
+        integrity: inv.repositoryIntact ? 'secure' : 'breach',
+        dataLoss: inv.zeroDataLoss ? 'secure' : 'breach',
+      };
+      state.finalAudit = audit;
+      state.replayOnly = false;
+      setGauge('plaintext', audit.plaintext);
+      setGauge('integrity', audit.integrity);
+      setGauge('dataloss', audit.dataLoss);
+    }
+    return true;
+  }
+
   // ---------- boot ----------
 
-  loadEvents(generateDemo(), { label: 'demo match — simulated data', autoplay: true });
+  tryLoadPublishedRun().then(function (loaded) {
+    if (!loaded) loadEvents(generateDemo(), { label: 'demo match — simulated data', autoplay: true });
+  });
 })();
 </script>
 </body>

@@ -59,6 +59,26 @@ and the three hard invariants as gauges that resolve once the match ends.
 - Nothing is uploaded anywhere; a loaded file is read locally by the
   browser and never leaves it.
 
+### Published automatically: GitHub Pages
+
+`.github/workflows/node.js.yml`'s `chaos` job runs the sandbox nightly
+(03:00 UTC) and on manual dispatch (Actions tab → "Node.js CI" → "Run
+workflow"), extracts `report.jsonl` and `verifier-result.json`, and
+deploys them alongside a copy of the viewer as a GitHub Pages site — the
+viewer's `tryLoadPublishedRun()` fetches those same-directory files at
+boot and shows the actual latest run automatically, no manual "Load
+report" click needed (see [specs/chaotests/02-viewer.md](
+../specs/chaotests/02-viewer.md)'s "Auto-loading a published run"). It
+never runs on push/PR and a violation never blocks a merge — see the job's
+own comment in the workflow file for why.
+
+**One-time setup required, not done by this workflow itself:** GitHub
+Pages has to be enabled once in this repo's Settings → Pages → "Build and
+deployment" → Source: **GitHub Actions**. Until that's set, the
+`deploy-pages` job fails with a clear error; the `chaos` job's own
+artifacts (uploaded via `actions/upload-artifact`, 90-day retention) are
+still available from the Actions run regardless.
+
 ## What "success" means
 
 Three hard invariants, checked regardless of what chaos happened — the

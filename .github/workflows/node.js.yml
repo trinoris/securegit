@@ -8,6 +8,11 @@ on:
     branches: [ "master" ]
   pull_request:
     branches: [ "master" ]
+  schedule:
+    # Nightly chaos-sandbox run — see the `chaos` job below for why this
+    # stays off the push/PR path.
+    - cron: '0 3 * * *'
+  workflow_dispatch: {}
 
 jobs:
   build:
@@ -16,7 +21,7 @@ jobs:
 
     strategy:
       matrix:
-        node-version: [20.x, 22.x]
+        node-version: [22.x]
         # See supported Node.js release schedule at https://nodejs.org/en/about/releases/
 
     steps:
@@ -29,3 +34,93 @@ jobs:
     - run: npm ci
     - run: npm run build --if-present
     - run: npm test
+
+  # Runs the Docker Compose chaos sandbox (chaos/docker-compose.yml, see
+  # specs/chaotests/01-sandbox.md), then publishes the run's report and
+  # final audit alongside chaos/viewer/index.html as a GitHub Pages site.
+  #
+  # Deliberately nightly + manual only, never on push/PR: this is a several-
+  # minute, fuzzing-campaign-style run ("reported, not scored" per
+  # specs/chaotests/01-sandbox.md), not a fast deterministic gate, and it's
+  # new enough (two real bugs found and fixed in the sandbox itself the
+  # first time it was actually run) that it shouldn't block merges yet.
+  chaos:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    env:
+      CHAOS_DURATION_SECONDS: 180
+      VERIFIER_STARTUP_GRACE_SECONDS: 20
+      VERIFIER_SETTLE_SECONDS: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run the chaos sandbox
+        run: |
+          docker compose -f chaos/docker-compose.yml up --build -d
+          docker compose -f chaos/docker-compose.yml wait verifier
+
+      - name: Extract the run's report and audit
+        run: |
+          mkdir -p site
+          docker compose -f chaos/docker-compose.yml logs verifier > verifier.log
+          docker compose -f chaos/docker-compose.yml run --rm --no-deps verifier cat /report/report.jsonl > site/report.jsonl
+          docker compose -f chaos/docker-compose.yml run --rm --no-deps verifier cat /report/verifier-result.json > site/verifier-result.json
+          cp chaos/viewer/index.html site/index.html
+
+      - name: Tear down
+        if: always()
+        run: docker compose -f chaos/docker-compose.yml down -v
+
+      # Always publish, pass or fail — a violation is exactly the
+      # interesting result this exists to surface, not one to hide.
+      - name: Upload raw run artifacts (report, audit, logs)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chaos-run-${{ github.run_id }}
+          path: |
+            site/report.jsonl
+            site/verifier-result.json
+            verifier.log
+
+      - name: Configure Pages
+        if: always()
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        if: always()
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      # Last step, deliberately: publishing above must happen regardless
+      # of outcome. Failing here just makes a violated run show red on the
+      # schedule/dispatch history — see the job comment for why this can
+      # never affect a push/PR run's status.
+      - name: Fail if a hard invariant was violated
+        run: |
+          held=$(jq -r '.hardInvariantsHeld' site/verifier-result.json)
+          echo "hardInvariantsHeld=$held"
+          if [ "$held" != "true" ]; then
+            echo "::error::A hard invariant was violated this run — see the deployed viewer or verifier.log."
+            exit 1
+          fi
+
+  deploy-pages:
+    needs: chaos
+    if: always() && needs.chaos.result != 'skipped' && needs.chaos.result != 'cancelled'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

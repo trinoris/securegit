@@ -16,19 +16,32 @@ ends.
 
 It exists so the answer to "did anything bad happen during that run" is a
 90-second skim, not a manual `grep` through several thousand JSONL lines —
-and, since Docker was never run in the environment this was built in (see
-[01](01-sandbox.md)'s Status note), so the *shape* of a match is visible
-immediately, before a real run ever produces a real `report.jsonl`.
+and, for whoever hasn't run Docker themselves yet, so the *shape* of a
+match is visible immediately via the demo, before a real run ever
+produces a real `report.jsonl`.
 
-**Status: BUILT, self-reviewed, not seen in a real browser by the AI
-session that wrote it** (no browser available in that environment either).
-The event-classification logic (`classifyRealEvent()`) was checked by hand
-against `chaos/lib/log.mjs`'s actual `record()` call sites across
-`chaos/actors/driver.mjs` and `chaos/agents/*.mjs`, and the generated
-`<script>` was validated with `node --check` after every edit, but nothing
-here has been exercised against a real `report.jsonl` from an actual
-Docker run — because none exists yet. First thing to re-check once [01](
-01-sandbox.md) is actually run once.
+**Status: BUILT, event-classification confirmed against two real Docker
+runs, still never opened in an actual browser.** [01](01-sandbox.md)'s own
+Status note covers the two real sandbox runs this session performed
+locally (finding and fixing two real bugs along the way); this file's
+`classifyRealEvent()` logic was checked by hand against `chaos/lib/log.mjs`'s
+actual `record()` call sites, and the message shapes/field names it
+depends on (`attempted`, `technique`/`action`, `missingCommits`/
+`decryptFailures` as arrays, etc.) were cross-checked directly against
+real `report.jsonl`/`verifier-result.json` output from those runs — not
+just read from the source, actually diffed against real data. The auto-
+load path (`tryLoadPublishedRun()`) and the `.github/workflows/node.js.yml`
+`chaos`/`deploy-pages` jobs that feed it are new and **not yet verified
+end to end** — the workflow YAML parses and the sandbox mechanics it
+drives are proven, but the actual GitHub Pages deploy has never run (that
+needs a real GitHub Actions execution, plus a one-time manual "Source:
+GitHub Actions" toggle in the repo's Settings → Pages, neither of which an
+AI session can do from a local checkout). What's still fully unverified in
+any browser: `node --check` proves the `<script>` block is syntactically
+valid JavaScript, but nothing here confirms it renders or behaves
+correctly — the CSS, the DOM manipulation, the playback timing, the
+fetch-based auto-load's actual runtime behavior. First thing to re-check
+once the `chaos` workflow job has actually run once for real.
 
 ## Non-goals
 
@@ -78,12 +91,34 @@ A file that matches neither shape (unparseable, or valid JSON but missing
 both an `invariants` key and any recognizable role lines) shows an alert
 rather than a blank or misleading board.
 
+## Auto-loading a published run
+
+At boot, before falling back to the demo, `tryLoadPublishedRun()` tries
+`fetch('./report.jsonl')` and `fetch('./verifier-result.json')` — same-
+directory siblings, `cache: 'no-store'` so a redeploy is never served
+stale. This is what makes the `chaos` job in
+`.github/workflows/node.js.yml` work: it copies `chaos/viewer/index.html`
+to `site/index.html` alongside the run's own `report.jsonl` and
+`verifier-result.json`, and GitHub Pages serves the three as one static
+site — so the published page shows the actual latest nightly run, no
+manual "Load report" click needed.
+
+When both files are present, the final audit from `verifier-result.json`
+is authoritative and overrides whatever the replay alone could show (only
+ever the data-recovery gauge — see "Two input shapes, two views" above) —
+applied immediately at boot rather than waiting for playback to reach the
+end, since a page someone checks for CI status shouldn't have to sit
+through a full replay first to find out if it held. A `fetch` failure
+(no server at all — a plain double-clicked local file — or no sibling
+file present) is treated identically to "nothing published yet," not an
+error: it falls through to the synthetic demo below exactly as before.
+
 ## Demo match
 
-With no file loaded, the viewer boots straight into an auto-playing
-**synthetic demo** (`generateDemo()`) — 9 rounds built from the exact same
-event shapes `classifyRealEvent()` produces from a real report, so what a
-match looks like is visible before Docker is ever touched. It is
+The fallback when no published run is found: an auto-playing **synthetic
+demo** (`generateDemo()`) — 9 rounds built from the exact same event
+shapes `classifyRealEvent()` produces from a real report, so what a match
+looks like is visible before Docker (or CI) is ever touched. It is
 unambiguously labeled: the source readout in the header reads "demo
 match — simulated data" for the whole match (never switches to a "live"
 style), and it always resolves with all three gauges secure — a demo is
@@ -210,3 +245,11 @@ spec only covers how that result gets rendered.
   validate the replay path against first.
 - **Multi-run comparison.** Loading two `report.jsonl`/`verifier-result.json`
   pairs side by side (e.g. before/after a fix) has no supporting UI today.
+- **Run history.** The published GitHub Pages site (see "Auto-loading a
+  published run" above) always shows only the *latest* nightly run —
+  `.github/workflows/node.js.yml`'s Pages deploy overwrites the same site
+  each time. There's no archive of past runs to compare trends against
+  (is invariant 1 violated every night, or was last night's T1-driven
+  violation new?). `actions/upload-artifact`'s per-run zip (90-day
+  retention, GitHub's default) is the only current history, and it isn't
+  linked from the published page at all.
