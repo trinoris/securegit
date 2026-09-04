@@ -62,14 +62,23 @@ jobs:
       - name: Run the chaos sandbox
         run: |
           docker compose -f chaos/docker-compose.yml up --build -d
-          docker compose -f chaos/docker-compose.yml wait verifier
+          # `wait` exits with verifier's own exit code — a hard-invariant
+          # violation (or any other reason verifier itself exits nonzero)
+          # must NOT abort this step under -e, or every step below that's
+          # `if: always()` for exactly this reason (publish a failing run,
+          # not just a passing one) never gets anything to publish, and the
+          # underlying failure's own report/logs are lost for good once the
+          # runner tears down. The actual pass/fail signal comes from
+          # verifier-result.json itself, in the last step below.
+          docker compose -f chaos/docker-compose.yml wait verifier || true
 
       - name: Extract the run's report and audit
+        if: always()
         run: |
           mkdir -p site
-          docker compose -f chaos/docker-compose.yml logs verifier > verifier.log
-          docker compose -f chaos/docker-compose.yml run --rm --no-deps verifier cat /report/report.jsonl > site/report.jsonl
-          docker compose -f chaos/docker-compose.yml run --rm --no-deps verifier cat /report/verifier-result.json > site/verifier-result.json
+          docker compose -f chaos/docker-compose.yml logs verifier > verifier.log || true
+          docker compose -f chaos/docker-compose.yml run --rm --no-deps verifier cat /report/report.jsonl > site/report.jsonl || true
+          docker compose -f chaos/docker-compose.yml run --rm --no-deps verifier cat /report/verifier-result.json > site/verifier-result.json || true
           cp chaos/viewer/index.html site/index.html
 
       - name: Tear down
@@ -103,7 +112,12 @@ jobs:
       # schedule/dispatch history — see the job comment for why this can
       # never affect a push/PR run's status.
       - name: Fail if a hard invariant was violated
+        if: always()
         run: |
+          if [ ! -s site/verifier-result.json ]; then
+            echo "::error::verifier-result.json is missing or empty — the sandbox run itself failed before producing a result (see the 'Run the chaos sandbox' step and verifier.log in the uploaded artifact, if any)."
+            exit 1
+          fi
           held=$(jq -r '.hardInvariantsHeld' site/verifier-result.json)
           echo "hardInvariantsHeld=$held"
           if [ "$held" != "true" ]; then
