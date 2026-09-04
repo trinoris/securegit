@@ -1,0 +1,59 @@
+name: Release
+
+# Triggered only by pushing a version tag — nothing here runs on an
+# ordinary push to master. Bump package.json's "version", commit, then:
+#   git tag v0.1.0 && git push --tags
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # for `gh release create`, this repo only
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify the tag matches package.json's version
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          pkg_version=$(node -p "require('./package.json').version")
+          if [ "$tag_version" != "$pkg_version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match package.json version $pkg_version"
+            exit 1
+          fi
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.x'
+          cache: 'npm'
+          # GitHub Packages, not the public npm registry — package.json's
+          # publishConfig.registry already points here too; both are set,
+          # which is the documented belt-and-suspenders pattern.
+          registry-url: 'https://npm.pkg.github.com'
+          scope: '@trinoris'
+
+      - run: npm ci
+      - run: npm audit --audit-level=high
+      - run: npm run build
+      - run: npm test
+
+      - name: Publish to GitHub Packages
+        run: npm publish
+        env:
+          # The default GITHUB_TOKEN can only publish packages within this
+          # same repository's owner (cuongquay). This package is scoped
+          # @trinoris, a separate GitHub org — publishing under it needs a
+          # Personal Access Token (classic, `write:packages` +
+          # `read:packages`) from an account with publish rights in that
+          # org, added once as this repo's TRINORIS_PACKAGES_TOKEN secret.
+          # An AI session cannot create that token or the secret.
+          NODE_AUTH_TOKEN: ${{ secrets.TRINORIS_PACKAGES_TOKEN }}
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create "${{ github.ref_name }}" --generate-notes

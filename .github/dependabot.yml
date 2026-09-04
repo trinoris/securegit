@@ -1,0 +1,14 @@
+version: 2
+updates:
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+
+  # Keeps the third-party Actions this repo now depends on (checkout,
+  # setup-node, codeql-action, deploy-pages, gitleaks-action, ...) pinned
+  # to current versions rather than silently drifting.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"

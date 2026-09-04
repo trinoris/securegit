@@ -1,0 +1,14 @@
+title = "trinoris-securegit gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Known non-secret sandbox/test fixtures, not real credentials"
+regexes = [
+  # chaos/docker-compose.yml's shared SECUREGIT_PASSPHRASE — every actor in
+  # the chaos sandbox uses this same well-known joke passphrase on purpose
+  # (see specs/chaotests/01-sandbox.md's "Design choices worth knowing
+  # about": shared-secret model, not real key material at rest anywhere).
+  '''correct horse battery staple sandbox edition''',
+]

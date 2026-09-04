@@ -11,6 +11,9 @@
   "bin": {
     "securegit": "./dist/bin/securegit.js"
   },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
