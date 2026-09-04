@@ -11,6 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      security-events: write   # to upload the SARIF report to code scanning
     steps:
       - uses: actions/checkout@v4
         with:
@@ -18,7 +19,28 @@ jobs:
           # once and later removed is still a leaked secret.
           fetch-depth: 0
 
-      - uses: gitleaks/gitleaks-action@v2
+      # Not gitleaks/gitleaks-action — that wrapper now requires a paid
+      # GITLEAKS_LICENSE for any organization-owned repository (see its
+      # own README's "Announcement" section on the breaking change). The
+      # underlying gitleaks CLI itself stays fully open source (MIT), no
+      # license gate — this downloads and runs it directly instead.
+      - name: Install gitleaks
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITLEAKS_CONFIG: .gitleaks.toml
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          latest=$(gh api repos/gitleaks/gitleaks/releases/latest --jq .tag_name)
+          version="${latest#v}"
+          curl -sSL "https://github.com/gitleaks/gitleaks/releases/download/${latest}/gitleaks_${version}_linux_x64.tar.gz" -o gitleaks.tar.gz
+          tar -xzf gitleaks.tar.gz gitleaks
+          sudo install -m 0755 gitleaks /usr/local/bin/gitleaks
+          gitleaks version
+
+      - name: Run gitleaks
+        run: gitleaks detect --source . --config .gitleaks.toml --redact --report-format sarif --report-path gitleaks.sarif
+
+      - name: Upload SARIF to code scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: gitleaks.sarif

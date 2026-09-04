@@ -11,4 +11,16 @@ regexes = [
   # (see specs/chaotests/01-sandbox.md's "Design choices worth knowing
   # about": shared-secret model, not real key material at rest anywhere).
   '''correct horse battery staple sandbox edition''',
+  # src/verify.test.ts's deliberately AWS-key-shaped fixture, used only to
+  # assert that `verify`'s own leak-detector correctly flags content that
+  # *resembles* a secret (L4, directory-rename-drops-protection case). A
+  # synthetic string testing the detector, never a real credential.
+  '''AKIAABCDEFGHIJKL1234''',
+]
+paths = [
+  # Frozen known-answer crypto test vectors (specs/securegit/00-test-plan.md
+  # item 6) — fixed HKDF/tag/DEK hex values generated once and committed on
+  # purpose so seal()/unseal() can be checked byte-for-byte against them.
+  # Deterministic by design, never real key material.
+  '''^tests/fixtures/vectors/.*''',
 ]

@@ -4,6 +4,13 @@
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "lib": ["ES2022"],
+    // Explicit, not just relying on the default "every @types/* package in
+    // node_modules is ambient" behavior — CodeQL's own JS/TS extractor
+    // (a separate TypeScript pass from this project's real tsc build) is
+    // known to sometimes fail to auto-discover @types/node under
+    // moduleResolution: "NodeNext", surfacing as "Cannot find name
+    // 'process'" annotations even though `npm run build` succeeds fine.
+    "types": ["node"],
     "outDir": "./dist",
     "rootDir": "./src",
     "strict": true,
