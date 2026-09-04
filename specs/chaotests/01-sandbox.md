@@ -176,7 +176,8 @@ namespace (see "Sidecar vs. separate container" in Open Questions).
   auto-playing demo (clearly labeled as simulated) when no real run has
   happened yet, built from the same message shapes the real scripts
   produce, so the shape of a match is visible before Docker is ever
-  touched. See `chaos/README.md`'s "Watching it happen" section.
+  touched. See `chaos/README.md`'s "Watching it happen" section and
+  [02](02-viewer.md) for the viewer's own design spec.
 
 ## Verifying the invariants
 

@@ -19,7 +19,13 @@ COPY src ./src
 RUN npm run build
 
 FROM node:20-alpine
-RUN apk add --no-cache git bash coreutils iptables iproute2 procps
+# git-daemon is a separate Alpine package from git itself — Alpine splits
+# `git daemon` out (confirmed via `apk info -L git`, which does not list
+# it; `git-daemon` does). Without it `remote`'s `git daemon` invocation
+# fails immediately with "git: 'daemon' is not a git command" and the
+# service never actually listens on :9418 — every other service's clone/
+# fetch/push then times out waiting for a remote that was never there.
+RUN apk add --no-cache git git-daemon bash coreutils iptables iproute2 procps
 WORKDIR /app
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/package.json ./package.json
