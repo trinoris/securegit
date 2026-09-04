@@ -13,7 +13,7 @@ jobs:
       contents: read
       security-events: write   # to upload the SARIF report to code scanning
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Full history, not just the last commit — a secret committed
           # once and later removed is still a leaked secret.

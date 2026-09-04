@@ -25,7 +25,7 @@ jobs:
         # See supported Node.js release schedule at https://nodejs.org/en/about/releases/
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
     - name: Use Node.js ${{ matrix.node-version }}
       uses: actions/setup-node@v4
       with:
@@ -57,7 +57,7 @@ jobs:
       VERIFIER_STARTUP_GRACE_SECONDS: 20
       VERIFIER_SETTLE_SECONDS: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Run the chaos sandbox
         run: |

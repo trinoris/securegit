@@ -16,7 +16,7 @@ jobs:
       packages: write   # for `npm publish` to this repo's own GitHub Packages
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Verify the tag matches package.json's version
         run: |
