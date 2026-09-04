@@ -12,7 +12,8 @@ jobs:
   release:
     runs-on: ubuntu-latest
     permissions:
-      contents: write   # for `gh release create`, this repo only
+      contents: write   # for `gh release create`
+      packages: write   # for `npm publish` to this repo's own GitHub Packages
 
     steps:
       - uses: actions/checkout@v4
@@ -44,14 +45,12 @@ jobs:
       - name: Publish to GitHub Packages
         run: npm publish
         env:
-          # The default GITHUB_TOKEN can only publish packages within this
-          # same repository's owner (cuongquay). This package is scoped
-          # @trinoris, a separate GitHub org — publishing under it needs a
-          # Personal Access Token (classic, `write:packages` +
-          # `read:packages`) from an account with publish rights in that
-          # org, added once as this repo's TRINORIS_PACKAGES_TOKEN secret.
-          # An AI session cannot create that token or the secret.
-          NODE_AUTH_TOKEN: ${{ secrets.TRINORIS_PACKAGES_TOKEN }}
+          # The default GITHUB_TOKEN can publish here because the repo now
+          # lives under the same org (trinoris) as the package's own scope
+          # (@trinoris) — GitHub Packages requires that match. No separate
+          # PAT/secret needed, unlike when this repo was under a different
+          # owner than the package scope.
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Create GitHub Release
         env:
