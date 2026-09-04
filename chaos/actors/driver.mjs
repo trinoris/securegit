@@ -71,6 +71,13 @@ async function bootstrapAsCollaboratorA() {
   if (!alreadyInit) {
     await record('action', 'securegit init', await securegit(['init'], { cwd: WORK_DIR }));
     await record('action', 'securegit protect secrets/**', await securegit(['protect', 'secrets/**'], { cwd: WORK_DIR }));
+    // Must run before the seed files are ever `git add`ed — `.gitattributes`
+    // alone only tells git *which* paths to filter; without this, no
+    // `filter.securegit.clean` command is registered in `.git/config` at
+    // all, so `git add` silently commits them unfiltered (confirmed by a
+    // real chaos-sandbox run: every blob came back plaintext until this
+    // call was added — see specs/chaotests/01-sandbox.md's Status note).
+    await record('action', 'securegit install', await securegit(['install'], { cwd: WORK_DIR }));
     await mkdir(join(WORK_DIR, 'secrets'), { recursive: true });
     for (const role of ['collaborator-a', 'collaborator-b']) {
       await writeFile(join(WORK_DIR, 'secrets', `${role}.json`), `${JSON.stringify({ role, counter: 0 }, null, 2)}\n`);
@@ -103,7 +110,20 @@ async function bootstrapAsFollower() {
   await mkdir(dirname(keyringPath), { recursive: true });
   await copyFile(SHARED_KEYRING, keyringPath);
   await record('action', 'copied shared keyring into local HOME', { repoId: config.repoId });
+  // install-then-unlock-then-re-checkout, in that exact order — matches
+  // specs/securegit/08-multi-recipient.md's "Joining" flow. `install` must
+  // come *after* `cloneOrInit()`'s clone (a still-locked machine with the
+  // filter already attached fails closed on git's own safety-check `clean`
+  // call during a pull, per that spec), and unlock must come before the
+  // re-checkout below or there's no session to smudge-decrypt with.
+  await record('action', 'securegit install', await securegit(['install'], { cwd: WORK_DIR }));
   await record('action', 'securegit unlock (bootstrap)', await securegit(['unlock'], { cwd: WORK_DIR }));
+  // Files were checked out by `cloneOrInit()`'s `git clone`, before the
+  // filter existed — git's stat-cache means a plain re-checkout won't
+  // re-run smudge on them. `rm --cached` + checkout from HEAD does (see
+  // the same spec section for why `--force` alone does not).
+  await git(['rm', '--cached', '-r', '-q', '.'], { cwd: WORK_DIR, env: gitEnv() });
+  await git(['checkout', 'HEAD', '--', '.'], { cwd: WORK_DIR, env: gitEnv() });
 }
 
 /** Picks up a keyring the operator may have rotated since this actor last checked. */

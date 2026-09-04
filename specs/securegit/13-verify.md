@@ -179,8 +179,22 @@ would be actively misleading ([09](09-rotation-recovery.md)).
 securegit verify || exit 1
 ```
 
-`install --hooks` writes it. Configuration and index checks are fast enough for
-`pre-commit`; `--history` is not, and belongs in CI.
+**Correction: not built.** This section previously claimed `install --hooks`
+writes this file automatically. It doesn't — `cmdInstall` (`src/cli.ts`) has
+no `--hooks` flag, and nothing in `src/install.ts` ever touches
+`.git/hooks/`. Confirmed by grepping `src/` for `hooks`/`pre-push`: zero
+matches outside this doc and [16](16-adversarial-integrity.md). The two-line
+script above is real and works today if a user places it by hand; automating
+that placement is still an open item, not a shipped feature. Caught during a
+real chaos-sandbox run ([01-sandbox.md](../chaotests/01-sandbox.md)) where
+T1 (attribute downgrade) landed and nothing local was checking `verify`
+between rounds — see [16](16-adversarial-integrity.md)'s T1 section for the
+fuller writeup, including why a hook here is necessarily a convenience for an
+honest user rather than a defense against a hostile one (nothing stops
+deleting the hook, or pushing with a client that never runs it).
+
+Configuration and index checks are fast enough for `pre-commit`; `--history`
+is not, and belongs in CI.
 
 ## What this pass actually built
 

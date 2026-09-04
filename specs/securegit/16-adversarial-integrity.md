@@ -58,13 +58,57 @@ signature and the same detection.
 Mitigations, all cheap, all v1:
 
 - `verify` compares tracked paths against `git check-attr` and reads the first
-  bytes of every protected blob. Run it in `pre-push` and in CI.
-- `install --hooks` writes the `pre-push` hook.
+  bytes of every protected blob. Belongs in `pre-push` and in CI.
 - `verify --history` finds a downgrade that already landed.
+
+**Not built: `install --hooks`.** Earlier drafts of this section and
+[13](13-verify.md) claimed `install --hooks` writes a `.git/hooks/pre-push`
+running `securegit verify` automatically — it doesn't; `cmdInstall` has no
+such flag. The two-line hook itself is real and works if placed by hand, but
+nothing currently automates placing it. Confirmed missing by a real
+chaos-sandbox run: T1 landed at round 5, `verify` correctly flagged it every
+round after (`attributes-present: false`, exit code 2), and every subsequent
+collaborator commit still leaked in plaintext anyway, because nothing local
+was checking. See [chaotests/01-sandbox.md](../chaotests/01-sandbox.md).
+
+**Client-side hooks are a convenience, not a defense, against this
+adversary specifically.** A6 is "someone who can push" — that phrasing
+already allows for hostile, not just careless. A `pre-push` hook lives in
+the *pushing* client's own `.git/hooks/`; a hostile pusher who wants to land
+plaintext can simply not have the hook installed, delete it, or push
+`--no-verify`. It genuinely helps the *honest* collaborators who might
+otherwise forget to check — it does nothing against the adversary this
+section is actually about.
+
+**Recommended, not built: server-side enforcement for self-hosted git
+servers.** The one place a hostile pusher cannot opt out of a check is the
+server accepting the push. A `pre-receive` hook on the bare repository can
+inspect every incoming ref update — for each new commit, for each path under
+a protected pattern, read the new blob and reject the whole push if it isn't
+envelope-shaped (the same check `verify` already does). Two things worth
+being precise about if this is ever built:
+
+- **Evaluate "protected pattern" against the state *before* the push, not
+  the incoming one.** Otherwise an attacker downgrades `.gitattributes` and
+  adds a plaintext file in the same push, and the check validates the new
+  file against the attacker's own edited rules instead of the ones that were
+  actually in force.
+- **This only exists for servers you administer.** A `pre-receive` hook is a
+  file placed directly on the git server's own disk — there is no git
+  mechanism to install one remotely, and no config a client can set that
+  propagates it. That makes it available for a self-hosted bare repo,
+  gitolite, Gitea, or GitLab self-managed. It is **not available at all** on
+  github.com, Bitbucket Cloud, or GitLab.com's standard tiers — those
+  platforms don't expose server-side hooks to ordinary users (GitHub only
+  offers this on GitHub Enterprise Server). A meaningful fraction of this
+  tool's likely users are on exactly those platforms, and get no benefit
+  from this mitigation regardless of how it's packaged.
 
 There is no cryptographic fix. The repository cannot contain a value that proves
 `.gitattributes` was not edited, because whoever edits it can edit that too.
-This is a code-review problem with a detector attached.
+This is a code-review problem with a detector attached — client-side tooling
+can make the detector convenient to run; only a server you control can make
+it mandatory.
 
 ## T3 and T4 — relocation and rollback
 
