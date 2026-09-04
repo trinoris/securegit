@@ -188,7 +188,10 @@ but `clean` has no such case; it always fails closed when locked, proven in
 `src/filter.test.ts`. What actually makes F16 true is Git's own stat-cache
 short-circuit skipping `add` entirely for a path whose worktree content
 already matches the index — the same mechanism, from the opposite side, as
-why the F2/F4/F8 recovery isn't `checkout --force`.
+why the F2/F4/F8 recovery isn't `checkout --force`. **Later correction:**
+that skip turned out not to be reliable across filesystems — see
+[15](15-failure-modes.md)'s F16 section for the `strace`-confirmed finding
+and how the test was reframed to stop depending on it.
 
 The residue/untracked-residue check ([16](16-adversarial-integrity.md), T12)
 is the fourth and last item on Phase 2's build order, and it's done: `verify`

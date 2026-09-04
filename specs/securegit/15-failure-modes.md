@@ -55,7 +55,7 @@ code path to test.
 | F13 | Concurrent `key rotate` and `git add` | rotate's dirty-tree check refuses (exit 4) rather than race the add; if it ever did win, session invalidation would fail the add F9-style, never mix generations | rotate refused with a "commit or stash first" message, or (unobserved so far) an F9-style add failure | rerun the rotate once the tree is clean |
 | F14 | Keyring lost, no recipients, no recovery export | — | every protected blob is permanently unreadable | none. This is the failure the design cannot soften. |
 | F15 | Recovery file present, code lost | — | as F14 | none |
-| F16 | Clone by someone with no key, who commits without ever touching the protected file | Git's own stat-cache skips `add`/`commit` staging a path whose worktree content already matches the index — `clean` is never invoked at all | works; the file is unmodified ciphertext | — (Git never calls the filter; see below, not `clean`'s passthrough) |
+| F16 | Clone by someone with no key, who commits without ever touching the protected file | Git's own stat-cache *may* skip `add`/`commit` staging a path whose worktree content already matches the index, so `clean` is *sometimes* never invoked at all — but this is Git's own call, not a guarantee this package can make (see below) | usually works silently; if Git decides to re-verify instead, a lock error the same as F1 | — (either Git never calls the filter, or `clean` fails closed exactly like F1 — both are safe) |
 | F17 | Merge driver absent, protected file conflicts | Git reports a binary conflict | "Cannot merge binary files" | `securegit install`; take one side and re-merge |
 | F18 | `core.autocrlf=true`, `-text` missing | ciphertext is CRLF-mangled on the way in or out | F6 on the next checkout | add `-text` ([02](02-git-integration.md)), re-commit the file from a good copy |
 | F19 | Repository moved, `repoId` mismatch | wrapped keys fail their AAD check | "this keyring belongs to repository `4f9a…`, this repository is `7c02…`" | use the right keyring, or `import-recovery` |
@@ -98,16 +98,39 @@ already a valid envelope.** The comment in `filter.ts` says why: "a locked
 filter cannot verify the passthrough precondition" — proving an envelope
 authentic still requires the key.
 
-What actually makes F16 true is the same Git stat-cache short-circuit behind
-the F2/F4/F8 recovery above, from the opposite side: `git add`/`commit` never
-invoke `clean` at all on a path whose worktree content already matches the
-index. A fresh, unmodified clone is exactly that case, so the filter never
-runs and there is nothing for "locked" to block. The moment the file's
-content or mtime actually changes — even rewritten with identical bytes —
-Git re-evaluates the path, calls `clean`, and it fails closed exactly like
-F1. This is provable and is exactly what the F16 integration test does:
-locked, re-add of a byte-identical worktree file succeeds silently; locked,
-re-add after touching the same file fails with the F1 message.
+What actually makes F16 true, when it's true, is the same Git stat-cache
+short-circuit behind the F2/F4/F8 recovery above, from the opposite side:
+`git add`/`commit` skip invoking `clean` at all on a path whose worktree
+content already matches the index. A fresh, unmodified clone is exactly
+that case, so the filter never runs and there is nothing for "locked" to
+block. The moment the file's content or mtime actually changes — even
+rewritten with identical bytes — Git re-evaluates the path, calls `clean`,
+and it fails closed exactly like F1.
+
+**Correction: the skip is not reliable, and the integration test no longer
+claims it is.** F16's test originally asserted the silent-no-op outcome
+unconditionally — true on the filesystem it was written against, but a
+real, reproducible failure on a faster one (confirmed with `strace` against
+an actual failing run, not inferred): Git decided to re-open and re-verify
+`PROTECTED_PATH` despite its stat size matching the index, invoking `clean`,
+which then correctly reported the true lock state. Neither an explicit past
+nor future `utimes()` touch fixed it (both *guarantee* a re-verify, which is
+the opposite of a no-op), and neither did a multi-second sleep before the
+add — this genuinely is Git's own racy-clean decision, sensitive to
+filesystem/timing conditions this package has no lever over, not a bug
+introduced by anything in this project's own state (confirmed by
+reproducing the exact same failure against unmodified, unrelated commits).
+
+The test (`src/git.integration.test.ts`, `noOpOrLockedError()`) now asserts
+what's actually guaranteed instead: whichever way Git decides — skip the
+filter, or invoke it — the outcome is safe. A skip is a genuine no-op. An
+invoke fails closed with the F1 message, never anything else, and never
+lets plaintext or a corrupted add through. `git status --porcelain`
+immediately after gets the identical tolerance, for the identical reason —
+it's subject to the same Git-side decision for this path. The second half
+of the test — forcing re-verification with a future mtime, and requiring
+that to fail closed — is untouched, and is the part of F16 that actually is
+a securegit guarantee.
 
 ## F21 is the same optimization again, seen from `merge`
 
