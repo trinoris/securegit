@@ -34,6 +34,56 @@ git add . && git commit -m "hello" && git push
 `git add`, `git status`, `git diff`, `git log -p` all behave normally — the
 filter is invisible until you go looking for it.
 
+## Why this matters
+
+Leaked credentials in version control are a well-documented, recurring
+cause of real breaches — not a hypothetical. A committed `.env` file, a
+database connection string, an API key in a config file: the moment it's
+pushed, it's in every clone, every fork, every CI runner's cache, and
+every backup snapshot that's already run. Rewriting history afterward
+rarely reaches all of them, and by then the secret itself has to be
+treated as burned regardless.
+
+What client-side encryption actually buys, concretely:
+
+- **A compromised third party's blast radius drops to zero for file
+  contents.** Your cloud storage provider, your CI runner, a mirror you
+  don't administer, a backup vendor — every one of them ends up holding
+  ciphertext only. A breach at any of them is not a breach of your
+  source, which matters as much for compliance narratives ("can this
+  cloud provider produce our plaintext under compulsion?") as for
+  security ones — see
+  [specs/securegit/01-threat-model.md](specs/securegit/01-threat-model.md)'s
+  "requirement that rules out KMS as a root".
+- **Revoking access is a real, forward-acting operation, not a hope.**
+  `key rotate` moves the repository onto a generation a departed
+  contractor's or employee's key cannot unwrap for anything written
+  afterward — see
+  [specs/securegit/09-rotation-recovery.md](specs/securegit/09-rotation-recovery.md).
+  It does not (and cannot) erase what they already read; nothing can.
+  But it stops the leak from continuing, which is the part every other
+  "revoke access" story in a plain Git repo can't actually deliver.
+- **No new habits for the team to remember.** `git add`, `git commit`,
+  `git push`, `git diff`, `git log -p` all behave exactly as before. A
+  security control that depends on people remembering an extra step
+  under deadline pressure is a control that eventually gets skipped —
+  this one doesn't ask for that.
+- **Zero runtime dependencies.** A tool that holds encryption keys is an
+  unusually attractive supply-chain target. This one has nothing to
+  compromise besides itself.
+
+**The adoption cost is `securegit init` and a few minutes; the incident
+this prevents is measured in days of response, forced credential
+rotation across every system the secret touched, and — depending on
+what leaked — mandatory disclosure.** And unlike almost every other
+control on this list, it works *before* the first plaintext byte ever
+leaves the workstation, not after something has already gone wrong.
+
+None of this is only asserted — [CHAOS.md](CHAOS.md) is a live,
+adversarial simulation that measures it against real Git, real attacks,
+and three real-world code-review workflows compared side by side, with
+results published from an actual run every night.
+
 ## Quickstart
 
 ```sh
@@ -87,23 +137,29 @@ specs/securegit/README.md#why-this-and-not-git-crypt--sops--age).
   chaos testing: process kills mid-write, concurrent races, a multi-actor
   Docker sandbox with adversarial agents, and the match-replay viewer that
   renders a run as a game (published nightly — see below).
+- **[CHAOS.md](CHAOS.md)** — what the chaos sandbox actually proves, in
+  plain terms: the three-workflow comparison, what real runs found, and
+  how to watch it live or run it yourself.
 
 ## Chaos sandbox
 
 A Docker Compose stack simulates real collaborators, a hostile pusher, a
 file-corrupting "virus", and infrastructure faults (kills, disk pressure,
-network drops) running concurrently against a shared remote, then audits
-three hard invariants: no plaintext ever leaked, the repository's object
-graph stayed intact, and zero confirmed-pushed data was lost.
+network drops) running concurrently against a shared remote — across
+three different git workflows (direct push, a gated shared branch, or a
+fully PR-gated `master`) — then audits three hard invariants: no
+plaintext ever leaked, the repository's object graph stayed intact, and
+zero confirmed-pushed data was lost. **[CHAOS.md](CHAOS.md)** has the full
+story, including what real runs actually found.
 
 ```sh
 npm run chaos:sandbox
 ```
 
-See [chaos/README.md](chaos/README.md). A nightly run is published as a
-GitHub Pages site (`.github/workflows/node.js.yml`'s `chaos` job) — once
-Pages is enabled for this repo, the latest run's replay is viewable at
-`https://trinoris.github.io/securegit/`.
+See [chaos/README.md](chaos/README.md) for prerequisites and exact
+commands. A nightly run of all three workflows is published as a GitHub
+Pages site (`.github/workflows/node.js.yml`'s `chaos` job) — the latest
+comparison is viewable at `https://trinoris.github.io/securegit/`.
 
 ## Development
 
