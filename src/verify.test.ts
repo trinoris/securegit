@@ -368,6 +368,102 @@ describe('verify()', () => {
   });
 });
 
+describe('commit-signed-by-recipient (specs/securegit/13-verify.md, "Authenticity")', () => {
+  function minimalRecipient(fingerprint: string, signingKey?: string): RecipientFile {
+    return {
+      version: 1,
+      fingerprint,
+      publicKey: 'SGPUB1-does-not-need-to-decode-for-this-test',
+      label: 'laptop',
+      addedAt: '2026-01-14T00:00:00.000Z',
+      addedBy: '',
+      ...(signingKey !== undefined ? { signingKey } : {}),
+      keys: {},
+    };
+  }
+
+  /** Generates a real Ed25519 SSH signing key and re-signs HEAD with it. */
+  async function signHeadWith(keyPath: string): Promise<string> {
+    await execFile('ssh-keygen', ['-t', 'ed25519', '-f', keyPath, '-N', '', '-C', 'x']);
+    const publicKey = (await readFile(`${keyPath}.pub`, 'utf8')).trim();
+    await execFile('git', ['config', 'gpg.format', 'ssh'], { cwd: dir });
+    await execFile('git', ['config', 'user.signingkey', keyPath], { cwd: dir });
+    await execFile('git', ['commit', '--quiet', '--amend', '--no-edit', '-S'], { cwd: dir });
+    return publicKey;
+  }
+
+  function checkFor(report: { checks: { id: string; ok: boolean; detail?: string }[] }) {
+    return report.checks.find((c) => c.id === 'commit-signed-by-recipient');
+  }
+
+  it('is ok with 0 recipients — nothing to check', async () => {
+    await setUpProtectedRepo();
+    const report = await verify({ repoDir: dir, home, providers: [] });
+    expect(checkFor(report)?.ok).toBe(true);
+  });
+
+  it('is ok with exactly 1 recipient — still nobody else to impersonate', async () => {
+    await setUpProtectedRepo();
+    await writeRecipientFile(recipientPath(dir, 'aaaa'), minimalRecipient('aaaa'));
+    const report = await verify({ repoDir: dir, home, providers: [] });
+    expect(checkFor(report)?.ok).toBe(true);
+  });
+
+  it('is ok with 2+ recipients if none of them has a signing key registered yet — not enforced until adopted', async () => {
+    await setUpProtectedRepo();
+    await writeRecipientFile(recipientPath(dir, 'aaaa'), minimalRecipient('aaaa'));
+    await writeRecipientFile(recipientPath(dir, 'bbbb'), minimalRecipient('bbbb'));
+    const report = await verify({ repoDir: dir, home, providers: [] });
+    expect(checkFor(report)?.ok).toBe(true);
+  });
+
+  /** A real Ed25519 SSH public key, never used to sign anything — just registered. */
+  async function freshPublicKey(keyPath: string): Promise<string> {
+    await execFile('ssh-keygen', ['-t', 'ed25519', '-f', keyPath, '-N', '', '-C', 'x']);
+    return (await readFile(`${keyPath}.pub`, 'utf8')).trim();
+  }
+
+  it('fails once 2+ recipients exist and at least one has signing configured, but HEAD is unsigned', async () => {
+    await setUpProtectedRepo();
+    const signingKey = await freshPublicKey(join(home, 'k'));
+    await writeRecipientFile(recipientPath(dir, 'aaaa'), minimalRecipient('aaaa', signingKey));
+    await writeRecipientFile(recipientPath(dir, 'bbbb'), minimalRecipient('bbbb'));
+    const report = await verify({ repoDir: dir, home, providers: [] });
+    expect(checkFor(report)?.ok).toBe(false);
+    expect(checkFor(report)?.detail).toMatch(/not signed/i);
+  });
+
+  it('passes when HEAD is signed by a key that matches a registered recipient', async () => {
+    await setUpProtectedRepo();
+    const publicKey = await signHeadWith(join(home, 'signer'));
+    await writeRecipientFile(recipientPath(dir, 'aaaa'), minimalRecipient('aaaa', publicKey));
+    await writeRecipientFile(recipientPath(dir, 'bbbb'), minimalRecipient('bbbb'));
+    const report = await verify({ repoDir: dir, home, providers: [] });
+    expect(checkFor(report)?.ok).toBe(true);
+  });
+
+  it('fails when HEAD is signed, but by a key not on the recipient list — the real attacker shape', async () => {
+    await setUpProtectedRepo();
+    await signHeadWith(join(home, 'attacker-key'));
+    // A real, different key is registered — HEAD's signer just isn't it.
+    const registeredPub = await freshPublicKey(join(home, 'registered'));
+    await writeRecipientFile(recipientPath(dir, 'aaaa'), minimalRecipient('aaaa', registeredPub));
+    await writeRecipientFile(recipientPath(dir, 'bbbb'), minimalRecipient('bbbb'));
+    const report = await verify({ repoDir: dir, home, providers: [] });
+    expect(checkFor(report)?.ok).toBe(false);
+    expect(checkFor(report)?.detail).toMatch(/not.*recognized|unrecognized/i);
+  });
+
+  it('contributes to the misconfigured exit tier, not leaked, when it fails', async () => {
+    await setUpProtectedRepo();
+    await writeRecipientFile(recipientPath(dir, 'aaaa'), minimalRecipient('aaaa', 'ssh-ed25519 AAAAunregistered'));
+    await writeRecipientFile(recipientPath(dir, 'bbbb'), minimalRecipient('bbbb'));
+    const report = await verify({ repoDir: dir, home, providers: [] });
+    expect(checkFor(report)?.ok).toBe(false);
+    expect(verifyExitCode(report)).toBe(EXIT_VERIFY_MISCONFIGURED);
+  });
+});
+
 describe('verifyExitCode()', () => {
   it('is 5 when any leak is present, regardless of other findings', () => {
     const report: VerifyReport = {

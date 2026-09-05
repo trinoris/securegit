@@ -4,7 +4,7 @@ import { type RecoveryLogEntry } from './recovery.js';
 export declare const EXIT_VERIFY_OK = 0;
 export declare const EXIT_VERIFY_MISCONFIGURED = 2;
 export declare const EXIT_VERIFY_LEAK = 5;
-export type CheckId = 'repo-initialised' | 'keyring-present' | 'filter-configured' | 'filter-required' | 'diff-driver-configured' | 'textconv-cache-disabled' | 'attributes-present' | 'metadata-exclusion' | 'no-conflicting-attributes' | 'key-material-outside-worktree' | 'non-custodial-unwrap-path';
+export type CheckId = 'repo-initialised' | 'keyring-present' | 'filter-configured' | 'filter-required' | 'diff-driver-configured' | 'textconv-cache-disabled' | 'attributes-present' | 'metadata-exclusion' | 'no-conflicting-attributes' | 'key-material-outside-worktree' | 'non-custodial-unwrap-path' | 'commit-signed-by-recipient';
 export interface CheckResult {
     id: CheckId;
     label: string;

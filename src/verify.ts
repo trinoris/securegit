@@ -20,6 +20,8 @@ import { randomBytes } from 'node:crypto';
 import { readConfig, resolveKeyringPath } from './config.js';
 import { readKeyringFile } from './keyring.js';
 import { resolveSessionPath } from './session.js';
+import { signingKeyFingerprint } from './identity.js';
+import { equalCt } from './crypto.js';
 import type { KeyProvider } from './provider.js';
 import { looksLikeEnvelope } from './envelope.js';
 import { EXCLUSION_LINE, RESIDUE_SUFFIXES } from './install.js';
@@ -50,7 +52,8 @@ export type CheckId =
   | 'metadata-exclusion'
   | 'no-conflicting-attributes'
   | 'key-material-outside-worktree'
-  | 'non-custodial-unwrap-path';
+  | 'non-custodial-unwrap-path'
+  | 'commit-signed-by-recipient';
 
 export interface CheckResult {
   id: CheckId;
@@ -140,6 +143,35 @@ async function gitConfigGet(repoDir: string, key: string): Promise<string | null
     const err = e as { code?: number };
     if (err.code === 1) return null; // unset
     throw e;
+  }
+}
+
+/**
+ * The SSH-format fingerprint of whoever signed `HEAD`, or `null` if it
+ * isn't signed at all — `%GF` resolves this straight from the commit's
+ * own embedded signature blob, independent of whether the signer is
+ * "trusted" by anything (confirmed directly: a commit signed by a key
+ * absent from `gpg.ssh.allowedSignersFile` still reports its real
+ * fingerprint via `%GF`, just a `%G?` of `U` instead of `G` — this
+ * function only ever needs the fingerprint, so it never bothers with
+ * `%G?` at all, and comparing the fingerprint against this repository's
+ * own recipient list *is* the trust decision, not `gpg.ssh.allowedSignersFile`).
+ * `/dev/null` as that file is deliberate, not a placeholder to fill in
+ * later — git refuses to attempt SSH signature parsing at all without
+ * one configured (confirmed directly too), but never actually reads it
+ * for what this function asks of it.
+ */
+async function headSignerFingerprint(repoDir: string): Promise<string | null> {
+  try {
+    const { stdout } = await execFile(
+      'git',
+      ['-c', 'gpg.ssh.allowedSignersFile=/dev/null', 'log', '-1', '--format=%GF', 'HEAD'],
+      { cwd: repoDir },
+    );
+    const fingerprint = stdout.trim();
+    return fingerprint.length > 0 ? fingerprint : null;
+  } catch {
+    return null; // no commits yet, or not a git repository — nothing to check
   }
 }
 
@@ -474,7 +506,72 @@ export async function verify(opts: VerifyOptions): Promise<VerifyReport> {
     ...(conflicting.length > 0 ? { detail: conflicting.join(', ') } : {}),
   });
 
+  checks.push(await commitSignedByRecipientCheck(opts.repoDir));
+
   return { checks, findings };
+}
+
+/**
+ * specs/securegit/13-verify.md, "Authenticity" — closes the gap
+ * documented in FAQ.md: every attribution claim elsewhere in this
+ * project (`addedBy`, git's own author field) is a self-reported string,
+ * not a proof. This is the one check that actually verifies who
+ * committed something, against this repository's own recipient list —
+ * see specs/securegit/08-multi-recipient.md's "Commit signing" for the
+ * full design and its honest limits (this checks `HEAD` only, never
+ * history predating adoption; see [13](13-verify.md)'s own "Authenticity"
+ * section for why a broader per-commit-range version is a merge
+ * reviewer's job, not this one's).
+ */
+async function commitSignedByRecipientCheck(repoDir: string): Promise<CheckResult> {
+  const id = 'commit-signed-by-recipient';
+  const label = 'HEAD signed by a known recipient';
+
+  const registered: { fingerprint: string; signingFingerprint: string }[] = [];
+  let recipientCount = 0;
+  try {
+    const entries = (await readdir(recipientsDir(repoDir))).filter((f) => f.endsWith('.json'));
+    recipientCount = entries.length;
+    for (const entry of entries) {
+      const recipient = await readRecipientFile(recipientPath(repoDir, entry.replace(/\.json$/, '')));
+      if (!recipient.signingKey) continue;
+      try {
+        registered.push({
+          fingerprint: recipient.fingerprint,
+          signingFingerprint: signingKeyFingerprint(recipient.signingKey),
+        });
+      } catch {
+        // A malformed signingKey in a committed file is its own problem,
+        // but not this check's — it just can never match, same as if the
+        // field were absent.
+      }
+    }
+  } catch {
+    // no recipients directory at all — recipientCount stays 0
+  }
+
+  // Two independent reasons this check has nothing to enforce yet, both
+  // "not adopted", neither "broken": nobody else has access at all
+  // (0-1 recipients — there is no one to impersonate), or nobody has
+  // registered a signing key yet even though others have access (2+
+  // recipients, zero signingKeys) — enforcing against an empty allow-list
+  // would fail every single commit forever, which is indistinguishable
+  // from a repository that simply hasn't turned this on.
+  if (recipientCount < 2) return { id, label, ok: true };
+  if (registered.length === 0) {
+    return { id, label, ok: true, detail: 'not yet enforced — no recipient has a signing key registered' };
+  }
+
+  const headFingerprint = await headSignerFingerprint(repoDir);
+  if (headFingerprint === null) {
+    return { id, label, ok: false, detail: 'HEAD is not signed' };
+  }
+  const headFingerprintBuf = Buffer.from(headFingerprint, 'utf8');
+  const match = registered.find((r) => equalCt(Buffer.from(r.signingFingerprint, 'utf8'), headFingerprintBuf));
+  if (!match) {
+    return { id, label, ok: false, detail: `HEAD is signed by an unrecognized key (${headFingerprint})` };
+  }
+  return { id, label, ok: true, detail: `signed by ${match.fingerprint}` };
 }
 
 // ---------------------------------------------------------------------------
