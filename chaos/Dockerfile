@@ -25,7 +25,15 @@ FROM node:20-alpine
 # fails immediately with "git: 'daemon' is not a git command" and the
 # service never actually listens on :9418 — every other service's clone/
 # fetch/push then times out waiting for a remote that was never there.
-RUN apk add --no-cache git git-daemon bash coreutils iptables iproute2 procps
+# openssh-keygen is likewise a separate package from git — needed once
+# commit signing entered the sandbox (specs/chaotests/03-orchestrator.md's
+# "Since then" note): `identity.ts`'s generateSigningKeyPair() shells out
+# to `ssh-keygen` directly, and git's own `gpg.format=ssh` signing
+# (`commit.gpgsign=true`) invokes `ssh-keygen -Y sign` internally at commit
+# time too — without this package, both fail with ENOENT (confirmed by a
+# real run: every collaborator's bootstrap crashed on
+# `identity init --generate-signing-key` until this was added).
+RUN apk add --no-cache git git-daemon openssh-keygen bash coreutils iptables iproute2 procps
 WORKDIR /app
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/package.json ./package.json

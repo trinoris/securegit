@@ -112,17 +112,74 @@ accepted), and a commit signed by an unregistered key (`%GF` present but
 absent from the registered set, correctly rejected) — the same three
 shapes point 5 exists to catch.
 
-**Honestly scoped, not yet exercised by a real chaos run:** the sandbox's
-own actors (`bootstrapAsCollaboratorA`/`bootstrapAsFollower`) share one
-keyring copied over `SHARED_DIR` rather than registering each other as
-recipients at all — so today, every real Docker chaos run has 0
-recipients, which is this check's own designed no-op tier
-(`commit-signed-by-recipient` and `allCommitsSignedByRecipient()` both
-treat 0-1 recipients as "nobody to impersonate," a silent pass, not a
-failure). The plumbing is real and locally confirmed; making a live chaos
-run actually exercise a rejection needs a separate, larger change —
-registering collaborator-a/collaborator-b as signing recipients at
-bootstrap and deliberately leaving chaos-5 unregistered — not done here.
+**Since then: the sandbox's own actors are now registered signing
+recipients, and the pre-receive hook enforces it on every ref, not just
+`master` (✅ built, confirmed by a real chaos run — W2's own read of the
+finding below).** The follow-up flagged above is done:
+`bootstrapAsCollaboratorA`/`bootstrapAsFollower` now generate a real
+signing identity per collaborator (`enableCommitSigning()`,
+`commit.gpgsign = true`, so every ordinary round commit is signed
+automatically), and the operator — the one role with privileged
+filesystem access to a hook-protected `BRANCH` — registers both as
+recipients at bootstrap (`registerSigningRecipients()`), deliberately
+never inviting chaos-5 into that exchange. `chaos/remote/entrypoint.mjs`'s
+hook (now `pre-receive-check.mjs`) was extended from "refuse any update to
+`master`" to *also* check, once signing has been adopted, every commit a
+push introduces to *any other* ref — closing exactly the gap this
+document's own earlier real runs exposed: chaos-5's T1 attribute-downgrade
+never needed to survive an orchestrator review to do damage, because
+`working` itself was never gated at push time at all, and a legitimate
+collaborator's own next ordinary pull silently inherited the downgrade.
+
+**Real bugs found and fixed getting there, each caught by an actual chaos
+run, not by inspection:**
+- `ssh-keygen` doesn't exist in the sandbox's `node:20-alpine` image at
+  all — `identity init --generate-signing-key` and git's own SSH commit
+  signing both shell out to it. Fixed: `chaos/Dockerfile` now installs
+  `openssh-keygen`.
+- `landReviewedMerge()`'s direct `update-ref` against the bare repo only
+  ever "worked" because every prior landing happened to be a fast-forward
+  (an already-network-pushed ref's own tip, which is already in the bare
+  repo's object database for free) — the first genuinely new commit built
+  directly on `BRANCH` (the recipients-registration commit) failed with
+  git's own "trying to write ref ... with nonexistent object". Fixed by
+  pushing to a disposable, unprotected scratch ref first (transferring the
+  object) before the privileged `update-ref` moves `BRANCH` itself — the
+  actual security property (that ref is never moved except by this path)
+  is unaffected, since the scratch push never touches it.
+- That same scratch-ref push then tripped the *new* per-ref signing check
+  on the orchestrator's own (unsigned — the operator was deliberately
+  never given a signing identity) merge commits. Fixed by exempting merge
+  commits (`--no-merges`) from the check: a merge commit introduces no new
+  content of its own, its parents are what's actually being vouched for.
+- The hook's own recipient lookup (`git ls-tree --name-only BRANCH --
+  .securegit/recipients`) was missing `-r` — without it, a tree path
+  returns exactly one bogus "entry" (the directory name itself, not its
+  contents), which silently pinned `recipientCount` at 1 forever,
+  permanently tripping the "fewer than 2 recipients" no-op tier regardless
+  of how many recipients actually existed. This is why the very first
+  attempt at a live chaos run showed `attackT1_attributeDowngrade — pushed`
+  even with two real recipients already registered — confirmed directly by
+  reproducing the exact `ls-tree` call against the live bare repo.
+- Along the way: chaos-5's own attack functions (T1/T3/T4/T5, unlike
+  `attackDirectMasterBypass`) don't check their `git push`'s actual outcome
+  at all — a rejected push and a genuinely "nothing to attack yet" case
+  both surface as the same `skipped` label. Not fixed here (out of scope
+  for this feature), but worth knowing when reading a report: `skipped`
+  with a `reason` starting `push failed:` is this hook working, not the
+  attack declining to run.
+
+**Confirmed by a real chaos run, watched live, not inferred:** with the
+fixes above, a genuine `attackT1_attributeDowngrade` attempt was directly
+observed being refused —
+`remote: refusing push to refs/heads/working — commit b32f2ed0 is not
+signed` — and the full run finished with `noPlaintextLeaked: HELD` (0
+violations). Re-verified against W1 (direct-master) and W3 (pr-gated) for
+regressions: W3 still holds all three invariants; W1 shows its same
+small, bounded violation count (2, this run) from the operator's periodic
+reconcile pass — both unchanged from before this feature, since
+`SIGNING_ENABLED` is deliberately `false` under direct-master (its hook
+stays a no-op, matching remote/entrypoint.mjs's existing behavior).
 
 ## Core Principle
 
@@ -489,9 +546,9 @@ Restated from [01](01-sandbox.md)'s own guardrails, extended for this spec:
 | W3: a clean collaborator feature branch is merged to `master` | `chaos/actors/driver.mjs`'s `reviewAndMaybeMerge()` | ✅ (local repro + real runs, e.g. 33956353815: `pr-gated` merged legitimate branches every run) |
 | W3: chaos-5's T1 (attribute downgrade) on a feature branch is rejected, `master`'s `.gitattributes` unchanged | same | ✅ (local repro + real runs) |
 | W3: chaos-5's T5 (hostile recipient) on a feature branch is always rejected/escalated, never merged | same (`recipientDiff` check) | ✅ (real runs: `pr-gated`'s `hostileRecipients` count was 0 in every run) |
-| W3: chaos-5's T3/T4 (relocation/rollback) on a feature branch is rejected via the commit-signing check (§5), not silently merged | `chaos/actors/driver.mjs`'s `allCommitsSignedByRecipient()` | ✅ built (chaos-5 is never a recipient, so any commit it produces fails the check regardless of content) — **not yet exercised by a real chaos run**: the sandbox's actors share one keyring rather than registering each other as signing recipients, so every live run still has 0 recipients, the check's own no-op tier. Registering collaborator-a/b at bootstrap (chaos-5 deliberately excluded) is the follow-up that would make a real run actually exercise a rejection. |
-| Commit signing: an unsigned commit, or one signed by a non-recipient, is rejected by the orchestrator regardless of what it changes | `chaos/actors/driver.mjs`'s `allCommitsSignedByRecipient()` | ✅ built, confirmed by direct local plumbing test (real `ssh-keygen`/`git -S`/`%GF`, no Docker) — not yet exercised by a live chaos run, see the row above |
-| Commit signing: a legitimate collaborator's properly-signed commit is unaffected, accepted as before | `chaos/actors/driver.mjs`'s `allCommitsSignedByRecipient()` | ✅ built, confirmed by the same local plumbing test — not yet exercised by a live chaos run |
+| W3: chaos-5's T3/T4 (relocation/rollback) on a feature branch is rejected via the commit-signing check (§5), not silently merged | `chaos/actors/driver.mjs`'s `allCommitsSignedByRecipient()` | ✅ built (chaos-5 is never a recipient, so any commit it produces fails the check regardless of content). Collaborator-a/b are now registered signing recipients at bootstrap (chaos-5 deliberately excluded) — but a live run's own `pre-receive-check.mjs` hook now refuses chaos-5's push *before* it ever reaches `working`/`feature/*` at all, so this specific merge-review-time check has not itself been the thing observed rejecting a T3/T4 attempt in a real run — the hook catches it first. Defense-in-depth for a deployment without hook access (github.com) remains the reason to keep both. |
+| Commit signing: an unsigned commit, or one signed by a non-recipient, is rejected by the orchestrator regardless of what it changes | `chaos/actors/driver.mjs`'s `allCommitsSignedByRecipient()` | ✅ built, confirmed by direct local plumbing test (real `ssh-keygen`/`git -S`/`%GF`, no Docker) — see the row above for why a live run exercises the *hook's* version of this rule first |
+| Commit signing: a legitimate collaborator's properly-signed commit is unaffected, accepted as before | `chaos/actors/driver.mjs`'s `allCommitsSignedByRecipient()` | ✅ built, confirmed by the same local plumbing test, and indirectly by every real run's own successful merges (collaborator-a/b's `commit.gpgsign=true` commits are signed and land normally) |
 | W3: chaos-5 pushing straight to `master` is refused by the `pre-receive` hook, never reaches the orchestrator | `remote/entrypoint.mjs`'s hook + `attacker.mjs`'s `attackDirectMasterBypass` | ✅ (local repro + real runs: every `direct-master-bypass` attempt logged `rejected: true`) |
 | W3: the merge-review step evaluates against `master`'s pre-merge state, not the branch's own edited `.gitattributes` (the same-push downgrade-plus-plaintext attack) | `chaos/actors/driver.mjs`'s `reviewAndMaybeMerge()` (always `checkout -B review origin/BRANCH` fresh) | ✅ (local repro) |
 | W2: `working` accumulates chaos-5's attacks like W1 — confirmed, and worse than originally predicted: a shared branch is *not* a quarantined staging area, since anyone with ordinary read access to the remote can already see it (see the corrected mechanism above) | full sandbox runs, `SANDBOX_WORKFLOW=working-branch` | ✅ real violations every run; promotion-to-`master` review itself also confirmed working (rejects resumed correctly once a hostile recipient landed on `working`) |
@@ -509,17 +566,14 @@ Restated from [01](01-sandbox.md)'s own guardrails, extended for this spec:
   *signing itself*, not about what to do with an uncertain verdict: how
   does a repository handle a legitimate collaborator who hasn't set up a
   signing key yet (see [08-multi-recipient.md](../securegit/08-multi-recipient.md)'s
-  "two cases this rule must not silently break")? Answered for the general
-  case (the no-op tiers), still open for this sandbox specifically: the
-  check itself is built (`allCommitsSignedByRecipient()`), but
-  `bootstrapAsCollaboratorA`/`bootstrapAsFollower` still share one keyring
-  rather than registering each other as recipients at all, so a real
-  chaos run's recipient count is always 0 today — the check's own no-op
-  tier, not a gap in the check. The remaining work is exactly the wiring
-  this bullet originally anticipated: every legitimate actor's container
-  generates a signing key at bootstrap and registers itself as a
-  recipient (same shared-volume mechanism the keyring already uses),
-  chaos-5 deliberately excluded — not done here.
+  "two cases this rule must not silently break")? **Resolved, both
+  generally (the no-op tiers) and for this sandbox specifically.**
+  `bootstrapAsCollaboratorA`/`bootstrapAsFollower` now generate a real
+  signing identity per collaborator and the operator registers both as
+  recipients at bootstrap, exactly the wiring this bullet originally
+  anticipated — chaos-5 deliberately excluded, same shared-volume exchange
+  mechanism the keyring already used. Confirmed live: a real chaos run
+  watched `attackT1_attributeDowngrade` get refused at push time.
 - **One driver file or a new one — resolved: one file.** `chaos/actors/driver.mjs`
   already branched on `SANDBOX_ROLE`; the review logic turned out to
   reuse enough of `operatorRound()`'s surroundings (`pullOnce()`, `git()`,

@@ -20,7 +20,7 @@ import { dirname, join } from 'node:path';
 import { git, securegit, securegitBinaryIO, runBinary, sleep, jitter } from '../lib/proc.mjs';
 import { say, record } from '../lib/log.mjs';
 import { waitFor } from '../lib/wait-for.mjs';
-import { resolveKeyringPath, readConfig } from '../lib/paths.mjs';
+import { resolveKeyringPath, readConfig, identityPath } from '../lib/paths.mjs';
 
 const ROLE = process.env.SANDBOX_ROLE;
 const REMOTE_URL = process.env.REMOTE_URL ?? 'git://remote/repo.git';
@@ -34,6 +34,15 @@ const HOME = process.env.HOME;
 // direct-master (W1) | working-branch (W2) | pr-gated (W3) —
 // specs/chaotests/03-orchestrator.md.
 const WORKFLOW = process.env.SANDBOX_WORKFLOW ?? 'direct-master';
+// Registering collaborator-a/b as signing recipients (chaos-5 deliberately
+// excluded) only matters where something actually checks a signature —
+// direct-master's pre-receive hook is an unconditional no-op
+// (remote/entrypoint.mjs), so there's nothing there for signing to harden,
+// and enabling it anyway would just make every ordinary commit fail
+// `verify`'s own commit-signed-by-recipient check for no protective
+// benefit. See 03-orchestrator.md's "Since then" note for why this exists.
+const SIGNING_ENABLED = WORKFLOW !== 'direct-master';
+const SHARED_IDENTITY = (role) => join(SHARED_DIR, `identity-${role}.json`);
 // Only set (and only meaningful) for the operator under working-branch/
 // pr-gated — see `landReviewedMerge()`.
 const REMOTE_REPO_PATH = process.env.REMOTE_REPO_PATH;
@@ -117,6 +126,75 @@ async function ensureTargetRef() {
   }
 }
 
+/**
+ * Generates this role's own signing identity (specs/securegit/08-multi-recipient.md,
+ * "Commit signing") and, unlike a real user, configures git to sign
+ * *every* subsequent commit automatically (`commit.gpgsign = true`) —
+ * `identity init` deliberately never touches git's own signing config
+ * itself (a real user might already have `user.signingkey` pointing
+ * somewhere else entirely), but this sandbox's collaborators have no
+ * existing signing setup to preserve, so wiring it up here is the
+ * sandbox's job, not the CLI's.
+ */
+async function enableCommitSigning() {
+  await record('action', 'securegit identity init --generate-signing-key', await securegit(['identity', 'init', '--generate-signing-key'], { cwd: WORK_DIR }));
+  const signingKeyFile = join(HOME, '.securegit', 'signing_key');
+  await git(['config', 'gpg.format', 'ssh'], { cwd: WORK_DIR });
+  await git(['config', 'user.signingkey', signingKeyFile], { cwd: WORK_DIR });
+  await git(['config', 'commit.gpgsign', 'true'], { cwd: WORK_DIR });
+  const identity = JSON.parse(await readFile(identityPath(HOME), 'utf8'));
+  return { fingerprint: identity.fingerprint, publicKey: identity.publicKey, signingKey: identity.signingKey };
+}
+
+/** Publishes the public half of this role's signing identity for whoever registers recipients to pick up. */
+async function publishSigningIdentity(identity) {
+  await mkdir(SHARED_DIR, { recursive: true });
+  await writeFile(SHARED_IDENTITY(ROLE), JSON.stringify(identity));
+  await record('action', 'published signing identity to shared volume', { fingerprint: identity.fingerprint });
+}
+
+/**
+ * Operator only: waits for both collaborators' published signing
+ * identities, then registers each as a recipient with `--signing-key` and
+ * lands the result directly onto `BRANCH` — via the same privileged
+ * `landReviewedMerge()` path the orchestrator's own reviewed merges use,
+ * not an ordinary push. This isn't a style choice: `BRANCH` accepts no
+ * ordinary-push *update* at all once the pre-receive hook is live (a
+ * first version of this function tried `git push origin BRANCH` from
+ * collaborator-a and was correctly refused by the very protection this
+ * feature depends on — confirmed by a real run's own
+ * "refusing direct push to refs/heads/main" rejection). Only the operator
+ * has the filesystem access to land it, which is also the more honest
+ * real-world shape: onboarding a repository's initial trusted signers is
+ * exactly the kind of one-time, administrative action a real deployment's
+ * trusted party performs, not something an ordinary collaborator pushes
+ * through on their own. chaos-5 is never invited into this exchange at
+ * all (no paired legitimate role to wait on), which is what makes it
+ * unable to sign anything under any registered key afterward.
+ */
+async function registerSigningRecipients() {
+  await waitFor(() => exists(SHARED_IDENTITY('collaborator-a')) && exists(SHARED_IDENTITY('collaborator-b')), {
+    description: 'both collaborators publishing signing identities',
+  });
+  await git(['fetch', 'origin', BRANCH], { cwd: WORK_DIR, env: gitEnv() });
+  const expectedOld = (await git(['rev-parse', `origin/${BRANCH}`], { cwd: WORK_DIR })).stdout.trim();
+  await git(['checkout', '-B', BRANCH, `origin/${BRANCH}`], { cwd: WORK_DIR, env: gitEnv() });
+  for (const role of ['collaborator-a', 'collaborator-b']) {
+    const identity = JSON.parse(await readFile(SHARED_IDENTITY(role), 'utf8'));
+    await record(
+      'action',
+      `securegit key add-recipient (${role}, signing)`,
+      await securegit(['key', 'add-recipient', identity.publicKey, '--label', role, '--signing-key', identity.signingKey], { cwd: WORK_DIR }),
+    );
+  }
+  await git(['add', '.securegit/recipients'], { cwd: WORK_DIR, env: gitEnv() });
+  const commit = await git(['commit', '-m', 'bootstrap: register collaborator-a and collaborator-b as signing recipients'], { cwd: WORK_DIR, env: gitEnv() });
+  await record('action', 'commit signing recipients', commit);
+  const newSha = (await git(['rev-parse', 'HEAD'], { cwd: WORK_DIR })).stdout.trim();
+  const landed = await landReviewedMerge(newSha, expectedOld);
+  await record('observation', 'landed signing recipients onto BRANCH', landed);
+}
+
 async function bootstrapAsCollaboratorA() {
   await cloneOrInit();
   await git(['checkout', '-B', BRANCH], { cwd: WORK_DIR, env: gitEnv() });
@@ -145,7 +223,12 @@ async function bootstrapAsCollaboratorA() {
     await record('observation', 'bootstrap push', push);
   }
 
-  await ensureTargetRef();
+  // Unlock and publish the keyring *before* switching to `working`
+  // (`ensureTargetRef()`, below) — this is what unblocks
+  // `bootstrapAsFollower()`'s own wait on `SHARED_READY`, and
+  // collaborator-b's signing identity (needed by
+  // `registerSigningRecipients()` next) can't exist until collaborator-b
+  // has started at all.
   await record('action', 'securegit unlock (bootstrap)', await securegit(['unlock'], { cwd: WORK_DIR }));
   const config = await readConfig(WORK_DIR);
   const keyringPath = resolveKeyringPath(config.repoId, HOME);
@@ -153,6 +236,13 @@ async function bootstrapAsCollaboratorA() {
   await copyFile(keyringPath, SHARED_KEYRING);
   await writeFile(SHARED_READY, `${config.repoId}\n`);
   await record('action', 'published keyring to shared volume for other actors to bootstrap from', { repoId: config.repoId });
+
+  if (SIGNING_ENABLED) {
+    const identity = await enableCommitSigning();
+    await publishSigningIdentity(identity);
+  }
+
+  await ensureTargetRef();
 }
 
 async function bootstrapAsFollower() {
@@ -181,6 +271,22 @@ async function bootstrapAsFollower() {
   // the same spec section for why `--force` alone does not).
   await git(['rm', '--cached', '-r', '-q', '.'], { cwd: WORK_DIR, env: gitEnv() });
   await git(['checkout', 'HEAD', '--', '.'], { cwd: WORK_DIR, env: gitEnv() });
+
+  // The operator reviews other roles' branches but never contributes its
+  // own content commits, so it has nothing for a signing check to gate —
+  // only collaborator-b needs an identity here (collaborator-a generated
+  // and published its own earlier, in bootstrapAsCollaboratorA()). The
+  // operator instead performs the *registration* itself once both
+  // identities exist, since it's the one role with the filesystem access
+  // to land that commit onto a hook-protected BRANCH at all.
+  if (ROLE === 'collaborator-b' && SIGNING_ENABLED) {
+    const identity = await enableCommitSigning();
+    await publishSigningIdentity(identity);
+  }
+  if (ROLE === 'operator' && SIGNING_ENABLED) {
+    await registerSigningRecipients();
+  }
+
   // The operator/orchestrator works directly against `BRANCH` always —
   // reviewing other roles' branches, never contributing its own.
   if (ROLE !== 'operator') await ensureTargetRef();
@@ -410,23 +516,38 @@ async function candidateRefs() {
 }
 
 /**
- * Lands a locally-computed commit as `master`'s new tip *without* going
- * through `git push` at all — a direct `update-ref` against the bare
- * repo's own filesystem (mounted read-write via `REMOTE_REPO_PATH`,
- * docker-compose.yml), which never invokes `receive-pack` and so never
- * runs the pre-receive hook every ordinary push (including the
- * orchestrator's own, were it to try) is subject to. This is the
- * privileged path 03-orchestrator.md's "Enforcing 'only the orchestrator
- * writes master'" describes: the network protocol gates everyone
- * uniformly (no identity to exempt anyone by); direct filesystem access
- * to the bare repo is what's actually reserved for the one trusted
- * process. The compare-and-swap form (`update-ref <ref> <new> <old>`)
- * refuses if `master` moved since `expectedOld` was read, which
- * shouldn't happen — the orchestrator is meant to be `master`'s only
- * writer under these two workflows — but costs nothing to check for
- * rather than assume.
+ * Lands a locally-computed commit as `master`'s new tip via a direct
+ * `update-ref` against the bare repo's own filesystem (mounted read-write
+ * via `REMOTE_REPO_PATH`, docker-compose.yml) — the *ref* update never
+ * invokes `receive-pack` and so never runs the pre-receive hook every
+ * ordinary push (including the orchestrator's own, were it to try) is
+ * subject to. This is the privileged path 03-orchestrator.md's "Enforcing
+ * 'only the orchestrator writes master'" describes: the network protocol
+ * gates everyone uniformly (no identity to exempt anyone by); direct
+ * filesystem access to the bare repo is what's actually reserved for the
+ * one trusted process. The compare-and-swap form
+ * (`update-ref <ref> <new> <old>`) refuses if `master` moved since
+ * `expectedOld` was read, which shouldn't happen — the orchestrator is
+ * meant to be `master`'s only writer under these two workflows — but
+ * costs nothing to check for rather than assume.
+ *
+ * The scratch-ref push first is a separate concern from the ref update
+ * itself: `newSha` is only ever *already* in the bare repo's own object
+ * database for free when landing happens to be a fast-forward (an
+ * already-pushed ref's own tip, the common case while `master` hasn't
+ * diverged from whatever's being merged) — a real, divergent merge commit
+ * (or, here, a plain new commit built directly on `master`) exists only
+ * in WORK_DIR's local objects until *something* transfers it, and
+ * `update-ref` alone refuses to point a ref at an object it doesn't have
+ * ("nonexistent object", confirmed directly the first time this function
+ * was ever asked to land a genuine non-fast-forward commit). Pushing to a
+ * disposable, unprotected ref name does that transfer — it invokes
+ * `receive-pack`, but never for `refs/heads/${BRANCH}` itself, so the
+ * actual property this function exists to guarantee (that ref is never
+ * moved except by this privileged path) is untouched.
  */
 async function landReviewedMerge(newSha, expectedOld) {
+  await git(['push', 'origin', `${newSha}:refs/land-object/${newSha}`], { cwd: WORK_DIR, env: gitEnv() });
   return git(['--git-dir', REMOTE_REPO_PATH, 'update-ref', `refs/heads/${BRANCH}`, newSha, expectedOld]);
 }
 

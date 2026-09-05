@@ -390,7 +390,7 @@ requests ([11](11-filter-process.md)).
 | T3: relocated blob decrypts under `bindPath = false`, as documented | `src/envelope.test.ts` | — | ✅ |
 | T5: `verify --access` names the commit that added each recipient | `src/verify.test.ts` | — | ✅ |
 | T5: `rotate` requires confirmation of the recipient count | `src/cli.test.ts` | — | ✅ |
-| T3/T4/T5: a commit signed by a fingerprint not on the recipient list is rejected by a merge review, regardless of attack shape | [chaos sandbox orchestrator](../chaotests/03-orchestrator.md) | — | ✅ built, confirmed by direct local plumbing test — not yet exercised by a live chaos run (see that spec's own honest scoping note) |
+| T3/T4/T5: a commit signed by a fingerprint not on the recipient list is rejected, regardless of attack shape | [chaos sandbox orchestrator](../chaotests/03-orchestrator.md)'s merge review and its `pre-receive` hook | — | ✅ built; a live chaos run watched a real `attackT1_attributeDowngrade` push refused directly (`refusing push to refs/heads/working — commit ... is not signed`), full run finishing with zero plaintext-leak violations — see that spec's own "Since then" note for the fixes this took |
 | T6: the recovery file alone does not decrypt without the code | `src/recovery.test.ts` | — | ✅ |
 | T6: an export appends to the committed recovery log, not the code or file | `src/recovery.test.ts` | — | ✅ |
 | T7: session file with loose permissions is deleted, not used | `src/session.test.ts` | — | ✅ |
