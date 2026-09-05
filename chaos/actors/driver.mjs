@@ -31,11 +31,36 @@ const SHARED_READY = join(SHARED_DIR, 'bootstrap-ready');
 const BRANCH = process.env.BRANCH ?? 'main';
 const DURATION_SECONDS = Number(process.env.CHAOS_DURATION_SECONDS ?? 300);
 const HOME = process.env.HOME;
+// direct-master (W1) | working-branch (W2) | pr-gated (W3) —
+// specs/chaotests/03-orchestrator.md.
+const WORKFLOW = process.env.SANDBOX_WORKFLOW ?? 'direct-master';
+// Only set (and only meaningful) for the operator under working-branch/
+// pr-gated — see `landReviewedMerge()`.
+const REMOTE_REPO_PATH = process.env.REMOTE_REPO_PATH;
 // What `bootstrapAsCollaboratorA` protects at seed time, and what the
 // operator's `reconcileProtection` keeps re-asserting every round — see
 // there for why one list serves both purposes.
 const PROTECTED_PATTERNS = ['secrets/**'];
 const GITATTRIBUTES_PATH = join(WORK_DIR, '.gitattributes');
+
+/**
+ * Where a non-orchestrator role's own edits land. Under `direct-master`
+ * this *is* `BRANCH` (today's only behaviour, unchanged); under the other
+ * two, `master` never accepts a direct update at all
+ * (chaos/remote/entrypoint.mjs's pre-receive hook) — every push instead
+ * targets a branch the orchestrator later reviews. `working-branch` (W2)
+ * shares one ref between both collaborators (and chaos-5); `pr-gated`
+ * (W3) gives every role, attacker included, its own, so the orchestrator
+ * reviews per-branch rather than per-promotion. Not called for `operator`
+ * itself — it works directly against `BRANCH`, reviewing, never
+ * contributing.
+ */
+function targetRef() {
+  if (WORKFLOW === 'direct-master') return BRANCH;
+  if (WORKFLOW === 'working-branch') return 'working';
+  return `feature/${ROLE}`;
+}
+const TARGET_REF = targetRef();
 
 if (!ROLE) {
   say('SANDBOX_ROLE not set — nothing to do');
@@ -70,6 +95,28 @@ async function cloneOrInit() {
   );
 }
 
+/**
+ * Adopts `TARGET_REF` if it already exists on `origin` (working-branch:
+ * whichever collaborator gets here second finds the other's already
+ * pushed), or creates it fresh otherwise (pr-gated: always unique per
+ * role, so always this branch). Either way this is a ref *creation* push
+ * the very first time anyone does it for a shared ref, or every time for
+ * a per-role one — both allowed unconditionally by the pre-receive hook,
+ * which only ever gates *updates* to `master`, never the creation of any
+ * other ref. Not called for `operator`/`direct-master` — see `targetRef()`.
+ */
+async function ensureTargetRef() {
+  if (TARGET_REF === BRANCH) return;
+  const remoteHas = await git(['ls-remote', '--exit-code', 'origin', `refs/heads/${TARGET_REF}`], { cwd: WORK_DIR });
+  if (remoteHas.code === 0) {
+    await git(['fetch', 'origin', TARGET_REF], { cwd: WORK_DIR, env: gitEnv() });
+    await git(['checkout', '-B', TARGET_REF, `origin/${TARGET_REF}`], { cwd: WORK_DIR, env: gitEnv() });
+  } else {
+    await git(['checkout', '-B', TARGET_REF], { cwd: WORK_DIR, env: gitEnv() });
+    await git(['push', 'origin', TARGET_REF], { cwd: WORK_DIR, env: gitEnv() });
+  }
+}
+
 async function bootstrapAsCollaboratorA() {
   await cloneOrInit();
   await git(['checkout', '-B', BRANCH], { cwd: WORK_DIR, env: gitEnv() });
@@ -98,6 +145,7 @@ async function bootstrapAsCollaboratorA() {
     await record('observation', 'bootstrap push', push);
   }
 
+  await ensureTargetRef();
   await record('action', 'securegit unlock (bootstrap)', await securegit(['unlock'], { cwd: WORK_DIR }));
   const config = await readConfig(WORK_DIR);
   const keyringPath = resolveKeyringPath(config.repoId, HOME);
@@ -133,6 +181,9 @@ async function bootstrapAsFollower() {
   // the same spec section for why `--force` alone does not).
   await git(['rm', '--cached', '-r', '-q', '.'], { cwd: WORK_DIR, env: gitEnv() });
   await git(['checkout', 'HEAD', '--', '.'], { cwd: WORK_DIR, env: gitEnv() });
+  // The operator/orchestrator works directly against `BRANCH` always —
+  // reviewing other roles' branches, never contributing its own.
+  if (ROLE !== 'operator') await ensureTargetRef();
 }
 
 /** Picks up a keyring the operator may have rotated since this actor last checked. */
@@ -147,10 +198,10 @@ async function resyncKeyring() {
   }
 }
 
-async function pullOnce() {
-  const fetchRes = await git(['fetch', 'origin', BRANCH], { cwd: WORK_DIR, env: gitEnv() });
+async function pullOnce(ref = BRANCH) {
+  const fetchRes = await git(['fetch', 'origin', ref], { cwd: WORK_DIR, env: gitEnv() });
   if (fetchRes.code !== 0) return { ok: false, step: 'fetch', ...fetchRes };
-  const mergeRes = await git(['merge', '--no-edit', `origin/${BRANCH}`], { cwd: WORK_DIR, env: gitEnv() });
+  const mergeRes = await git(['merge', '--no-edit', `origin/${ref}`], { cwd: WORK_DIR, env: gitEnv() });
   if (mergeRes.code !== 0) {
     await git(['merge', '--abort'], { cwd: WORK_DIR, env: gitEnv() });
     return { ok: false, step: 'merge', ...mergeRes };
@@ -163,7 +214,7 @@ async function collaboratorRound(n) {
   const unlock = await securegit(['unlock'], { cwd: WORK_DIR });
   await record('observation', `unlock (round ${n})`, { code: unlock.code });
 
-  const pull = await pullOnce();
+  const pull = await pullOnce(TARGET_REF);
   await record('observation', `pull (round ${n})`, pull);
 
   const filePath = join(WORK_DIR, 'secrets', `${ROLE}.json`);
@@ -184,14 +235,14 @@ async function collaboratorRound(n) {
     return;
   }
 
-  let push = await git(['push', 'origin', BRANCH], { cwd: WORK_DIR, env: gitEnv() });
+  let push = await git(['push', 'origin', TARGET_REF], { cwd: WORK_DIR, env: gitEnv() });
   if (push.code !== 0) {
     // Non-fast-forward is the ordinary outcome of a real push race with
     // another collaborator — pull once and retry, exactly what a human
     // would do, not a failure worth escalating on its own.
-    const retryPull = await pullOnce();
+    const retryPull = await pullOnce(TARGET_REF);
     if (retryPull.ok) {
-      push = await git(['push', 'origin', BRANCH], { cwd: WORK_DIR, env: gitEnv() });
+      push = await git(['push', 'origin', TARGET_REF], { cwd: WORK_DIR, env: gitEnv() });
     }
   }
   if (push.code === 0) {
@@ -340,6 +391,145 @@ async function operatorRound(n) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Orchestrator (working-branch / pr-gated) — specs/chaotests/03-orchestrator.md
+// ---------------------------------------------------------------------------
+
+/** `working-branch`: the one shared ref. `pr-gated`: every `feature/*` branch currently on `origin`. */
+async function candidateRefs() {
+  if (WORKFLOW === 'working-branch') return ['working'];
+  const res = await git(['ls-remote', '--heads', 'origin', 'feature/*'], { cwd: WORK_DIR });
+  if (res.code !== 0) return [];
+  return res.stdout
+    .trim()
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => line.split('\t')[1])
+    .filter(Boolean)
+    .map((ref) => ref.replace(/^refs\/heads\//, ''));
+}
+
+/**
+ * Lands a locally-computed commit as `master`'s new tip *without* going
+ * through `git push` at all — a direct `update-ref` against the bare
+ * repo's own filesystem (mounted read-write via `REMOTE_REPO_PATH`,
+ * docker-compose.yml), which never invokes `receive-pack` and so never
+ * runs the pre-receive hook every ordinary push (including the
+ * orchestrator's own, were it to try) is subject to. This is the
+ * privileged path 03-orchestrator.md's "Enforcing 'only the orchestrator
+ * writes master'" describes: the network protocol gates everyone
+ * uniformly (no identity to exempt anyone by); direct filesystem access
+ * to the bare repo is what's actually reserved for the one trusted
+ * process. The compare-and-swap form (`update-ref <ref> <new> <old>`)
+ * refuses if `master` moved since `expectedOld` was read, which
+ * shouldn't happen — the orchestrator is meant to be `master`'s only
+ * writer under these two workflows — but costs nothing to check for
+ * rather than assume.
+ */
+async function landReviewedMerge(newSha, expectedOld) {
+  return git(['--git-dir', REMOTE_REPO_PATH, 'update-ref', `refs/heads/${BRANCH}`, newSha, expectedOld]);
+}
+
+/**
+ * The merge-request review itself (03-orchestrator.md, "The orchestrator's
+ * review, precisely"): build the merge against `master`'s *current* tip
+ * (never trust the incoming branch's own `.gitattributes` — the same
+ * precision 16-adversarial-integrity.md's T1 section insists on), then
+ * accept or reject, never silently repair. Reuses `securegit verify`
+ * as-is rather than re-implementing its attribute/envelope checks —
+ * `verify` never needs a session ([13](../securegit/13-verify.md)), so
+ * this works whether or not the orchestrator itself is unlocked.
+ *
+ * Deliberately narrow, matching the spec's own honesty about what an
+ * automated check can prove:
+ *   - a merge conflict rejects outright (no auto-resolution attempted)
+ *   - any change under `.securegit/recipients/**` rejects unconditionally
+ *     (T5 — "no cryptographic fix... a code-review problem", never
+ *     auto-accepted regardless of how plausible it looks)
+ *   - `attributes-present` / `no-conflicting-attributes` failing, or any
+ *     `leak` finding, rejects (T1, both the attack and the accident case)
+ *   - anything else — including T3/T4's relocation/rollback shapes, which
+ *     16-adversarial-integrity.md is explicit have no cryptographic
+ *     detector — is accepted. A heuristic flag-not-block for those is a
+ *     documented future refinement (03-orchestrator.md's Open Questions),
+ *     not built here.
+ */
+async function reviewAndMaybeMerge(ref, sha, n) {
+  await git(['fetch', 'origin', BRANCH], { cwd: WORK_DIR, env: gitEnv() });
+  const expectedOld = (await git(['rev-parse', `origin/${BRANCH}`], { cwd: WORK_DIR })).stdout.trim();
+  await git(['checkout', '-B', 'review', `origin/${BRANCH}`], { cwd: WORK_DIR, env: gitEnv() });
+
+  const merge = await git(['merge', '--no-edit', sha], { cwd: WORK_DIR, env: gitEnv() });
+  if (merge.code !== 0) {
+    await git(['merge', '--abort'], { cwd: WORK_DIR, env: gitEnv() }).catch(() => {});
+    await record('action', `rejected ${ref} (round ${n}): merge conflict`, { ref, sha, stderr: merge.stderr.trim() });
+    return;
+  }
+
+  const recipientDiff = await git(
+    ['diff', '--name-only', `origin/${BRANCH}`, 'HEAD', '--', '.securegit/recipients'],
+    { cwd: WORK_DIR },
+  );
+  if (recipientDiff.stdout.trim().length > 0) {
+    await record('action', `rejected ${ref} (round ${n}): recipient change requires human review, never auto-merged`, {
+      ref,
+      sha,
+      changed: recipientDiff.stdout.trim().split('\n'),
+    });
+    return;
+  }
+
+  const verify = await securegit(['verify', '--json'], { cwd: WORK_DIR });
+  let report = null;
+  try {
+    report = JSON.parse(verify.stdout);
+  } catch {
+    // Falls through to the rejected branch below — an unparseable report
+    // is exactly as untrustworthy as a failed one, never treated as a pass.
+  }
+  const checkOk = (id) => report?.checks?.find((c) => c.id === id)?.ok === true;
+  const hasLeak = (report?.findings ?? []).some((f) => f.kind === 'leak');
+  const passed = report !== null && checkOk('attributes-present') && checkOk('no-conflicting-attributes') && !hasLeak;
+  if (!passed) {
+    await record('action', `rejected ${ref} (round ${n}): failed integrity review`, {
+      ref,
+      sha,
+      verify: report ?? verify.stdout.trim(),
+    });
+    return;
+  }
+
+  const mergeSha = (await git(['rev-parse', 'HEAD'], { cwd: WORK_DIR })).stdout.trim();
+  const landed = await landReviewedMerge(mergeSha, expectedOld);
+  if (landed.code !== 0) {
+    // `master` moved since `expectedOld` was read — shouldn't happen (the
+    // orchestrator is meant to be the only writer), but safe to just
+    // retry next round against a freshly re-fetched tip rather than
+    // escalate on what's likely a leftover from a previous run's volume.
+    await record('observation', `merge of ${ref} computed but update-ref lost a race (round ${n})`, {
+      ref,
+      sha,
+      stderr: landed.stderr.trim(),
+    });
+    return;
+  }
+  await record('action', `merged ${ref} onto master (round ${n})`, { ref, sha, mergeSha });
+}
+
+// ref -> last sha reviewed (accepted or rejected) — skips re-reviewing
+// (and re-logging) a branch nothing has changed on since last round.
+const lastReviewedSha = new Map();
+
+async function orchestratorReviewRound(n) {
+  for (const ref of await candidateRefs()) {
+    const shaRes = await git(['ls-remote', 'origin', `refs/heads/${ref}`], { cwd: WORK_DIR });
+    const sha = shaRes.stdout.trim().split('\t')[0];
+    if (!sha || lastReviewedSha.get(ref) === sha) continue;
+    lastReviewedSha.set(ref, sha);
+    await reviewAndMaybeMerge(ref, sha, n);
+  }
+}
+
 /**
  * The zero-data-loss check (see the exchange that led here: "whatever
  * chaos happened, the codebase integrity must be guaranteed and data loss
@@ -454,7 +644,11 @@ async function main() {
     round += 1;
     try {
       if (ROLE === 'operator') {
-        await operatorRound(round);
+        if (WORKFLOW === 'direct-master') {
+          await operatorRound(round);
+        } else {
+          await orchestratorReviewRound(round);
+        }
       } else {
         await collaboratorRound(round);
       }

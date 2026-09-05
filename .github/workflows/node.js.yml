@@ -37,8 +37,16 @@ jobs:
     - run: npm test
 
   # Runs the Docker Compose chaos sandbox (chaos/docker-compose.yml, see
-  # specs/chaotests/01-sandbox.md), then publishes the run's report and
-  # final audit alongside chaos/viewer/index.html as a GitHub Pages site.
+  # specs/chaotests/01-sandbox.md) once per git workflow this project
+  # models (specs/chaotests/03-orchestrator.md): direct-master (W1, no
+  # gate at all), working-branch (W2, gated only at the promotion to
+  # master), pr-gated (W3, every change reviewed before master ever
+  # moves). Each is its own matrix leg, `fail-fast: false` — W1 and W2 are
+  # *expected* to sometimes fail their own "hard invariant violated" check
+  # below (that's the whole comparison this exists to make), and one
+  # mode's expected red must never cancel the others mid-run. `chaos-
+  # publish` (below) assembles all three legs' results into one Pages
+  # site regardless of which legs failed.
   #
   # Deliberately nightly + manual only, never on push/PR: this is a several-
   # minute, fuzzing-campaign-style run ("reported, not scored" per
@@ -50,16 +58,19 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      pages: write
-      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        workflow: [direct-master, working-branch, pr-gated]
     env:
       CHAOS_DURATION_SECONDS: 180
       VERIFIER_STARTUP_GRACE_SECONDS: 20
       VERIFIER_SETTLE_SECONDS: 60
+      SANDBOX_WORKFLOW: ${{ matrix.workflow }}
     steps:
       - uses: actions/checkout@v7
 
-      - name: Run the chaos sandbox
+      - name: Run the chaos sandbox (${{ matrix.workflow }})
         run: |
           docker compose -f chaos/docker-compose.yml up --build -d
           # `wait` exits with verifier's own exit code — a hard-invariant
@@ -79,7 +90,6 @@ jobs:
           docker compose -f chaos/docker-compose.yml logs verifier > verifier.log || true
           docker compose -f chaos/docker-compose.yml run --rm --no-deps verifier cat /report/report.jsonl > site/report.jsonl || true
           docker compose -f chaos/docker-compose.yml run --rm --no-deps verifier cat /report/verifier-result.json > site/verifier-result.json || true
-          cp chaos/viewer/index.html site/index.html
 
       - name: Tear down
         if: always()
@@ -87,30 +97,25 @@ jobs:
 
       # Always publish, pass or fail — a violation is exactly the
       # interesting result this exists to surface, not one to hide.
-      - name: Upload raw run artifacts (report, audit, logs)
+      # A plain (non-Pages) artifact per leg — `chaos-publish` assembles
+      # all three into the one site actually deployed.
+      - name: Upload this workflow's raw run artifacts (report, audit, logs)
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: chaos-run-${{ github.run_id }}
+          name: chaos-result-${{ matrix.workflow }}-${{ github.run_id }}
           path: |
             site/report.jsonl
             site/verifier-result.json
             verifier.log
 
-      - name: Configure Pages
-        if: always()
-        uses: actions/configure-pages@v6
-
-      - name: Upload Pages artifact
-        if: always()
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: site
-
       # Last step, deliberately: publishing above must happen regardless
       # of outcome. Failing here just makes a violated run show red on the
-      # schedule/dispatch history — see the job comment for why this can
-      # never affect a push/PR run's status.
+      # schedule/dispatch history, for *this leg only* (`fail-fast: false`
+      # keeps the other two workflows running and publishing regardless)
+      # — see the job comment for why this can never affect a push/PR
+      # run's status, and specs/chaotests/03-orchestrator.md's "Predicted
+      # plaintext-leak shape" table for which legs are expected to fail.
       - name: Fail if a hard invariant was violated
         if: always()
         run: |
@@ -121,13 +126,57 @@ jobs:
           held=$(jq -r '.hardInvariantsHeld' site/verifier-result.json)
           echo "hardInvariantsHeld=$held"
           if [ "$held" != "true" ]; then
-            echo "::error::A hard invariant was violated this run — see the deployed viewer or verifier.log."
+            echo "::error::A hard invariant was violated this run (workflow=${{ matrix.workflow }}) — see the deployed viewer or verifier.log."
             exit 1
           fi
 
-  deploy-pages:
+  # Assembles all three matrix legs' results into one site and publishes
+  # it — `if: always()` because W1/W2 failing their own invariant check
+  # above is the expected, interesting result this whole comparison
+  # exists to surface, never a reason to skip publishing it.
+  chaos-publish:
     needs: chaos
-    if: always() && needs.chaos.result != 'skipped' && needs.chaos.result != 'cancelled'
+    if: always() && needs.chaos.result != 'cancelled'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download every workflow's results
+        uses: actions/download-artifact@v8
+        with:
+          pattern: chaos-result-*-${{ github.run_id }}
+          path: downloaded
+
+      - name: Assemble the comparison site
+        run: |
+          mkdir -p site
+          cp chaos/viewer/index.html site/index.html
+          for workflow in direct-master working-branch pr-gated; do
+            mkdir -p "site/$workflow"
+            src="downloaded/chaos-result-$workflow-${{ github.run_id }}"
+            if [ -d "$src" ]; then
+              cp "$src"/report.jsonl "site/$workflow/report.jsonl" 2>/dev/null || true
+              cp "$src"/verifier-result.json "site/$workflow/verifier-result.json" 2>/dev/null || true
+            else
+              echo "::warning::no results downloaded for workflow=$workflow (that matrix leg likely never completed the 'Run the chaos sandbox' step)"
+            fi
+          done
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v6
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy-pages:
+    needs: chaos-publish
+    if: always() && needs.chaos-publish.result != 'skipped' && needs.chaos-publish.result != 'cancelled'
     runs-on: ubuntu-latest
     permissions:
       pages: write

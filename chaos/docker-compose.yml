@@ -24,6 +24,12 @@ x-common-env: &common-env
   CHAOS_DURATION_SECONDS: ${CHAOS_DURATION_SECONDS:-300}
   REPORT_PATH: /report/report.jsonl
   SHARED_DIR: /shared
+  # direct-master (W1, default) | working-branch (W2) | pr-gated (W3) —
+  # specs/chaotests/03-orchestrator.md. Only `direct-master` matches
+  # 01-sandbox.md's original single-branch design; the other two route
+  # every non-orchestrator push through a branch `master` never accepts
+  # updates to directly (remote/entrypoint.mjs's pre-receive hook).
+  SANDBOX_WORKFLOW: ${SANDBOX_WORKFLOW:-direct-master}
 
 services:
   remote:
@@ -35,6 +41,16 @@ services:
       - "9418"
     environment:
       REPO_PATH: /repos/repo.git
+      BRANCH: main
+      SANDBOX_WORKFLOW: ${SANDBOX_WORKFLOW:-direct-master}
+    volumes:
+      # Also mounted (read-write) on `operator` under working-branch/
+      # pr-gated, so it can land a reviewed merge via a direct `git
+      # update-ref` against this exact bare repo — a privileged path that
+      # never invokes `receive-pack` and so never runs the pre-receive
+      # hook guarding `master` over the ordinary git:// protocol. See
+      # remote/entrypoint.mjs's header comment.
+      - remote-repo-data:/repos
 
   collaborator-a:
     build:
@@ -79,10 +95,14 @@ services:
       SANDBOX_ROLE: operator
       HOME: /home/operator
       WORK_DIR: /work
+      # Only used under working-branch/pr-gated (ignored, and mounted
+      # harmlessly, under direct-master) — see remote's `volumes:` comment.
+      REMOTE_REPO_PATH: /remote-repo/repo.git
     volumes:
       - report-data:/report
       - keyring-shared:/shared
       - home-actor3:/home/operator
+      - remote-repo-data:/remote-repo
 
   chaos-4-virus:
     build:
@@ -117,6 +137,7 @@ services:
       WORK_DIR: /work
       REPORT_PATH: /report/report.jsonl
       CHAOS_DURATION_SECONDS: ${CHAOS_DURATION_SECONDS:-300}
+      SANDBOX_WORKFLOW: ${SANDBOX_WORKFLOW:-direct-master}
     volumes:
       - report-data:/report
     # No HOME/keyring volume of any kind — chaos-5 only ever has ordinary
@@ -181,3 +202,4 @@ volumes:
   home-actor1: {}
   home-actor2: {}
   home-actor3: {}
+  remote-repo-data: {}

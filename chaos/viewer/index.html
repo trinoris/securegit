@@ -116,6 +116,52 @@
   .meta-value.tabular { font-variant-numeric: tabular-nums; }
   #sourceLabel.is-live { color: var(--warn); }
 
+  /* ---------- workflow comparison (specs/chaotests/03-orchestrator.md) ---------- */
+  .wf-compare {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 14px;
+  }
+  @media (max-width: 980px) { .wf-compare { grid-template-columns: 1fr; } }
+  .wf-card {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 14px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    cursor: pointer;
+    transition: border-color 140ms ease;
+  }
+  .wf-card:hover { border-color: var(--text-dim); }
+  .wf-card.active { border-color: var(--hold); box-shadow: 0 0 0 1px var(--hold); }
+  .wf-card-title {
+    font-family: var(--font-display);
+    font-size: 11.5px;
+    letter-spacing: 0.06em;
+    color: var(--text);
+  }
+  .wf-card-sub {
+    font-family: var(--font-body);
+    font-size: 11.5px;
+    color: var(--text-faint);
+  }
+  .wf-card-verdict {
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    letter-spacing: 0.04em;
+    padding: 3px 0;
+  }
+  .wf-card.secure .wf-card-verdict { color: var(--hold); }
+  .wf-card.breach .wf-card-verdict { color: var(--breach); }
+  .wf-card.missing .wf-card-verdict, .wf-card.pending .wf-card-verdict { color: var(--text-faint); }
+  .wf-card-detail {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-dim);
+  }
+
   /* ---------- transport ---------- */
   .transport {
     display: flex;
@@ -410,6 +456,27 @@
     </div>
   </header>
 
+  <section class="wf-compare" id="wfCompare" hidden aria-label="Workflow comparison">
+    <div class="wf-card pending" id="wf-card-direct-master" data-mode="direct-master">
+      <div class="wf-card-title">W1 &middot; DIRECT TO MASTER</div>
+      <div class="wf-card-sub">no gate — anyone with push access lands directly</div>
+      <div class="wf-card-verdict" data-f="verdict">checking&hellip;</div>
+      <div class="wf-card-detail" data-f="detail"></div>
+    </div>
+    <div class="wf-card pending" id="wf-card-working-branch" data-mode="working-branch">
+      <div class="wf-card-title">W2 &middot; SHARED WORKING BRANCH</div>
+      <div class="wf-card-sub">ungated working branch, gated only at promotion to master</div>
+      <div class="wf-card-verdict" data-f="verdict">checking&hellip;</div>
+      <div class="wf-card-detail" data-f="detail"></div>
+    </div>
+    <div class="wf-card pending" id="wf-card-pr-gated" data-mode="pr-gated">
+      <div class="wf-card-title">W3 &middot; PR-GATED MASTER</div>
+      <div class="wf-card-sub">every change reviewed by the orchestrator before master moves</div>
+      <div class="wf-card-verdict" data-f="verdict">checking&hellip;</div>
+      <div class="wf-card-detail" data-f="detail"></div>
+    </div>
+  </section>
+
   <div class="transport">
     <button id="playBtn" class="transport-btn primary" type="button">&#9658; Play</button>
     <input id="scrub" type="range" min="0" max="0" value="0" aria-label="Scrub match timeline">
@@ -467,7 +534,7 @@
     <div class="resolution-detail" id="resolutionDetail"></div>
   </div>
 
-  <p class="footnote">Reads <code>chaos/report.jsonl</code> or <code>verifier-result.json</code> from a real sandbox run &mdash; see <code>specs/chaotests/01-sandbox.md</code>. Nothing here is uploaded; the file never leaves your browser.</p>
+  <p class="footnote">Reads <code>chaos/report.jsonl</code> or <code>verifier-result.json</code> from a real sandbox run &mdash; see <code>specs/chaotests/01-sandbox.md</code> and, for the three-workflow comparison above, <code>specs/chaotests/03-orchestrator.md</code>. Nothing here is uploaded; the file never leaves your browser.</p>
 </div>
 
 <script>
@@ -846,13 +913,22 @@
 
     if (role === 'chaos-5-attacker') {
       if (msg.indexOf('attack round') === 0) {
-        var landed = raw.attempted === true;
+        // `rejected === true` (only possible for `direct-master-bypass`,
+        // specs/chaotests/03-orchestrator.md) means the push was attempted
+        // AND refused server-side — a good outcome, must not render as
+        // "landed" just because `attempted` is also true.
+        var landed = raw.attempted === true && raw.rejected !== true;
         var tech = raw.technique || 'ATTACK';
+        var techLabel = tech === 'T1' ? 'gitattributes downgraded'
+          : tech === 'T3' ? 'blob relocated'
+          : tech === 'T4' ? 'blob rolled back'
+          : tech === 'T5' ? 'hostile recipient added'
+          : 'direct push to master landed — GATE FAILED';
         return Object.assign(base, {
-          kind: landed ? 'hostile' : 'neutral',
+          kind: landed ? 'hostile' : (raw.rejected === true ? 'friendly' : 'neutral'),
           wasAttempt: true,
-          tag: landed ? tech + ' LANDED' : 'BLOCKED',
-          text: landed ? (tech === 'T1' ? 'gitattributes downgraded' : tech === 'T3' ? 'blob relocated' : tech === 'T4' ? 'blob rolled back' : 'hostile recipient added') : (raw.reason || 'push rejected')
+          tag: landed ? tech + ' LANDED' : (raw.rejected === true ? 'REFUSED' : 'BLOCKED'),
+          text: landed ? techLabel : (raw.rejected === true ? 'direct push to master refused by remote' : (raw.reason || 'push rejected'))
           // no hitTargetId — the attacker targets the shared remote, not
           // any one collaborator's own systems (see specs/chaotests/
           // 01-sandbox.md: it only ever acts through ordinary git push)
@@ -1012,9 +1088,9 @@
   // ---------- auto-load a published run, if this page was deployed
   // alongside one (see .github/workflows/node.js.yml's `chaos` job) ----------
 
-  async function fetchJsonSibling(name, asText) {
+  async function fetchJsonSibling(name, asText, prefix) {
     try {
-      const res = await fetch('./' + name, { cache: 'no-store' });
+      const res = await fetch('./' + (prefix || '') + name, { cache: 'no-store' });
       if (!res.ok) return null;
       return asText ? await res.text() : await res.json();
     } catch (e) {
@@ -1025,15 +1101,21 @@
     }
   }
 
-  async function tryLoadPublishedRun() {
-    var reportText = await fetchJsonSibling('report.jsonl', true);
-    var result = await fetchJsonSibling('verifier-result.json', false);
+  // `prefix` is '' for a single-run publish (today's `chaos-run-*`
+  // artifact shape, and still what a local double-clicked file resolves
+  // against) or '<mode>/' for one leg of the three-workflow comparison
+  // below (`.github/workflows/node.js.yml`'s `chaos-publish` job —
+  // specs/chaotests/03-orchestrator.md).
+  async function tryLoadPublishedRun(prefix) {
+    prefix = prefix || '';
+    var reportText = await fetchJsonSibling('report.jsonl', true, prefix);
+    var result = await fetchJsonSibling('verifier-result.json', false, prefix);
     if (!reportText && !result) return false;
 
     if (reportText) {
       var events = parseJsonl(reportText);
       if (events.length > 0) {
-        loadEvents(events, { label: 'latest published run', live: true, replayOnly: !result, autoplay: true });
+        loadEvents(events, { label: (prefix || 'latest published run'), live: true, replayOnly: !result, autoplay: true });
       } else if (result) {
         showSnapshot(result);
       } else {
@@ -1064,10 +1146,81 @@
     return true;
   }
 
+  // ---------- three-workflow comparison (specs/chaotests/03-orchestrator.md) ----------
+  // `chaos-publish` (.github/workflows/node.js.yml) assembles all three
+  // matrix legs' results as `<mode>/report.jsonl` + `<mode>/verifier-
+  // result.json` siblings of this page. Absent entirely for a single-run
+  // publish (`chaos-run-*`, this file's older shape) or a locally opened
+  // file — the panel just stays hidden in that case, see loadComparison's
+  // return value.
+  var MODES = ['direct-master', 'working-branch', 'pr-gated'];
+
+  function setWfCard(mode, level, verdictText, detailText) {
+    var card = document.getElementById('wf-card-' + mode);
+    if (!card) return;
+    card.classList.remove('pending', 'secure', 'breach', 'missing');
+    card.classList.add(level);
+    card.querySelector('[data-f="verdict"]').textContent = verdictText;
+    card.querySelector('[data-f="detail"]').textContent = detailText || '';
+  }
+
+  function setActiveWfCard(mode) {
+    document.querySelectorAll('.wf-card').forEach(function (c) {
+      c.classList.toggle('active', c.dataset.mode === mode);
+    });
+  }
+
+  // Returns the list of modes that actually had a result to show, so the
+  // caller can decide whether the comparison panel (and which mode to
+  // auto-load) makes sense at all.
+  async function loadComparison() {
+    var found = [];
+    for (var i = 0; i < MODES.length; i++) {
+      var mode = MODES[i];
+      var result = await fetchJsonSibling('verifier-result.json', false, mode + '/');
+      if (!result) {
+        setWfCard(mode, 'missing', 'no data', 'this leg did not publish a result for this run');
+        continue;
+      }
+      found.push(mode);
+      var held = result.hardInvariantsHeld === true;
+      var violations = (result.plaintextCheck && result.plaintextCheck.violations && result.plaintextCheck.violations.length) || 0;
+      setWfCard(
+        mode,
+        held ? 'secure' : 'breach',
+        held ? 'ALL INVARIANTS HELD' : 'INVARIANT VIOLATED',
+        violations > 0 ? violations + ' plaintext violation' + (violations === 1 ? '' : 's') : (held ? 'click to view the match' : 'click to view the match')
+      );
+    }
+    if (found.length > 0) {
+      document.getElementById('wfCompare').hidden = false;
+      document.querySelectorAll('.wf-card').forEach(function (card) {
+        card.addEventListener('click', function () {
+          var mode = card.dataset.mode;
+          if (found.indexOf(mode) === -1) return;
+          setActiveWfCard(mode);
+          tryLoadPublishedRun(mode + '/');
+        });
+      });
+    }
+    return found;
+  }
+
   // ---------- boot ----------
 
-  tryLoadPublishedRun().then(function (loaded) {
-    if (!loaded) loadEvents(generateDemo(), { label: 'demo match — simulated data', autoplay: true });
+  loadComparison().then(function (found) {
+    if (found.length > 0) {
+      // W3 (pr-gated) is the workflow this whole comparison exists to
+      // vindicate — default to showing it, not whichever mode happens to
+      // sort first.
+      var initial = found.indexOf('pr-gated') !== -1 ? 'pr-gated' : found[0];
+      setActiveWfCard(initial);
+      tryLoadPublishedRun(initial + '/');
+      return;
+    }
+    tryLoadPublishedRun('').then(function (loaded) {
+      if (!loaded) loadEvents(generateDemo(), { label: 'demo match — simulated data', autoplay: true });
+    });
   });
 })();
 </script>
