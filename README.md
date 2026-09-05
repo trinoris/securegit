@@ -140,6 +140,8 @@ specs/securegit/README.md#why-this-and-not-git-crypt--sops--age).
 - **[CHAOS.md](CHAOS.md)** — what the chaos sandbox actually proves, in
   plain terms: the three-workflow comparison, what real runs found, and
   how to watch it live or run it yourself.
+- **[FAQ.md](FAQ.md)** — common questions answered in plain terms, e.g.
+  what an RMK is and why there's no "owner" role in the key model.
 
 ## Chaos sandbox
 
