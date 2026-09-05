@@ -27,7 +27,15 @@ specified precisely enough to build, plus the one thing that note didn't
 have yet: an empirical comparison, in the same sandbox, of how much
 difference the gate actually makes against the identical attack traffic.
 
-**Status: IMPLEMENTED, NOT YET CONFIRMED BY A REAL RUN.** `SANDBOX_WORKFLOW`
+**Status: IMPLEMENTED AND CONFIRMED.** Three real GitHub Actions runs
+(33955186271 → 33955584166 → 33955942857 → 33956353815, each fixing a real
+bug the previous one found) converged on a clean, repeatable result:
+`pr-gated` reaches `hardInvariantsHeld: true` — zero plaintext violations,
+zero hostile recipients, zero data loss — while `direct-master` and
+`working-branch` both consistently show real violations. See "Predicted
+plaintext-leak shape" below for the corrected mechanism (branch isolation,
+not just post-hoc rejection) and the Test Cases table for exactly what
+each bug was. `SANDBOX_WORKFLOW`
 (`direct-master`/`working-branch`/`pr-gated`) is wired through
 `chaos/docker-compose.yml`, `chaos/remote/entrypoint.mjs` (the pre-receive
 hook), `chaos/actors/driver.mjs` (`targetRef()`/`ensureTargetRef()`,
@@ -59,9 +67,29 @@ initial clean state, which trivially has nothing to leak. The local repro
 never caught this because it always fetched the branch by name before
 merging by hand; the real driver code didn't do the same until this was
 found. Fixed by having `orchestratorReviewRound()` `git fetch origin
-<ref>` (not `ls-remote`) before ever attempting the merge — see the git
-history for the exact commit. A second real run is what actually confirms
-the fix and the headline comparison; not yet run as of this note.
+<ref>` (not `ls-remote`) before ever attempting the merge.
+
+**Second real run (33955584166) — the actual comparison landed clean**
+(`pr-gated`: all three invariants held; `direct-master`/`working-branch`:
+real violations, exactly the target claim) **but exposed two more, smaller
+bugs.** `chaos-publish`'s site assembly assumed each matrix leg's
+downloaded artifact was flat; `actions/upload-artifact` actually kept a
+`site/` prefix (the upload step lists `site/report.jsonl` alongside a
+*sibling* `verifier.log`, so the computed common ancestor is the workspace
+root, not `site/`) — every mode's comparison-panel subfolder came back 404
+until the copy path was corrected. Separately, `working-branch` showed
+`zeroDataLoss: false` by one or two commits even with zero decrypt
+failures — a collaborator's very last push landing after the
+orchestrator's last review round of the run, past the point anything would
+fetch that branch's tip again before `finalIntegritySelfCheck()`'s
+`git log --all`. Fixed by fetching every branch (`git fetch origin`, no
+ref argument) immediately before that check, not just `BRANCH`.
+
+**Third real run (33955942857) confirmed the site fix, re-surfaced the
+same data-loss race** (this time on `pr-gated`, 2 commits) **since the
+fetch-every-branch fix hadn't landed yet — fourth run (33956353815)
+confirmed it resolved:** `pr-gated` reached `hardInvariantsHeld: true`
+outright, all three invariants clean.
 
 ## Core Principle
 
@@ -343,15 +371,53 @@ produced it. What's new is a **prediction this spec makes and a later real
 run needs to confirm or correct**, stated precisely so "it worked" has a
 falsifiable meaning:
 
-| Workflow | Predicted plaintext-leak shape on `master` |
+| Workflow | Predicted plaintext-leak shape |
 |---|---|
 | W1 (`direct-master`) | Already measured: continues leaking every round after the downgrade, for the rest of the run (28 violations in the cited real run) — nothing stands between the attacker and `master`. |
-| W2 (`working-branch`) | `working` itself may accumulate plaintext exactly like W1 (nothing gates it), but `master` should show *at most* whatever the orchestrator's promotion review missed — expected close to zero T1 violations reaching `master`, T5 changes never reaching it at all. |
-| W3 (`pr-gated`) | Direct pushes to `master` refused at the transport (`pre-receive`), before content inspection. Attacks routed through a feature branch and caught by the review never reach `master` either. The only way plaintext reaches `master` under this mode is a gap in the orchestrator's own checks — which is exactly the scenario worth running chaos-5 against, repeatedly, to find. |
+| W2 (`working-branch`) | `working` itself may accumulate plaintext exactly like W1 (nothing gates it), and — see the correction below — that alone is already a real leak, not a quarantined staging area; the promotion review only ever stops it from *also* being blessed as `master`'s own history. |
+| W3 (`pr-gated`) | Direct pushes to `master` refused at the transport (`pre-receive`), before content inspection. Attacks routed through a feature branch and caught by the review never reach `master` either. |
 
-A run that contradicts this table is more interesting than one that
-confirms it — same spirit as [01](01-sandbox.md)'s "found an interesting
-near-miss, still triaging" framing for the verifier's report.
+**Confirmed by three real runs (33955186271 fixed forward through
+33956353815) — `pr-gated` reached `hardInvariantsHeld: true`, 0 violations,
+0 hostile recipients, twice out of three; `direct-master` and
+`working-branch` never once did.** But the *mechanism* for W3's result
+needed correcting once the numbers were actually looked at, not just
+their pass/fail color:
+
+**Correction: `verify.mjs`'s plaintext check walks `git rev-list --all`
+— every branch reachable in the clone, not `master` alone** — because
+[01](../securegit/01-threat-model.md)'s own invariant is "no plaintext
+ever crossed the boundary... everywhere in history", and a feature/
+working branch sitting on the shared remote is exactly as visible to
+anyone with ordinary read access as `master` is; nothing about a branch
+name makes git access-control it separately. This was invisible under W1
+(only `main` ever existed, so "`--all`" and "`main`" were the same set)
+and is why a run that contradicts the table above is more interesting
+than one that confirms it — same spirit as [01](01-sandbox.md)'s "found
+an interesting near-miss, still triaging" framing. It surfaced a real,
+structural difference between W2 and W3 the original table's "master
+should show at most..." framing didn't capture:
+
+- **W3 achieves zero not merely because the gate rejects bad merges, but
+  because each role's own feature branch is *isolated* from every other
+  role's.** T1 downgrades `.gitattributes` on `feature/chaos-5-attacker`
+  — a file collaborators never read, since each of their own branches has
+  its own independent copy. A collaborator's next edit on their *own*
+  branch is completely unaffected; there is no shared state for the
+  downgrade to poison. This is a stronger property than "reviewed before
+  landing" — it's that the attack has no victim to reach in the first
+  place.
+- **W2 has no such isolation — `working` is shared, so a downgrade
+  landing there *does* poison every collaborator's next edit on it**,
+  producing a real plaintext blob on the one branch everyone (including
+  chaos-5) reads and writes. The promotion review still does its job —
+  none of that ever gets blessed as `master`'s own history — but the leak
+  already happened the moment it was pushed, on a branch anyone with
+  ordinary read access to the remote could already see. Confirmed exactly
+  this shape in the cited runs: `working-branch` legs consistently showed
+  real violations while their own `merged working onto master` events
+  stayed few and early (before the first T1/T5 landed), with every later
+  promotion attempt correctly rejected.
 
 ## Scope guardrails
 
@@ -379,14 +445,14 @@ Restated from [01](01-sandbox.md)'s own guardrails, extended for this spec:
 
 | Test | Where it'd live | Status |
 |------|------------------|--------|
-| W3: a clean collaborator feature branch is merged to `master` | `chaos/actors/driver.mjs`'s `reviewAndMaybeMerge()` | ✅ (local repro) |
-| W3: chaos-5's T1 (attribute downgrade) on a feature branch is rejected, `master`'s `.gitattributes` unchanged | same | ✅ (local repro) |
-| W3: chaos-5's T5 (hostile recipient) on a feature branch is always rejected/escalated, never merged | same (`recipientDiff` check) | ✅ (code path exists; not yet exercised by a real run) |
-| W3: chaos-5's T3/T4 (relocation/rollback) on a feature branch is flagged, not silently merged | — | 🔲 **scope-cut, not built this pass** — `reviewAndMaybeMerge()`'s doc comment says so explicitly: no cryptographic or heuristic detector for T3/T4 exists yet, so a relocation/rollback that doesn't also trip T1/T5 is currently *accepted*, same as any other clean merge. Left as a documented gap (see this file's own "T3/T4 — relocation and rollback" review point), not silently claimed done. |
-| W3: chaos-5 pushing straight to `master` is refused by the `pre-receive` hook, never reaches the orchestrator | `remote/entrypoint.mjs`'s hook + `attacker.mjs`'s `attackDirectMasterBypass` | ✅ (local repro; real hook install path not yet run) |
+| W3: a clean collaborator feature branch is merged to `master` | `chaos/actors/driver.mjs`'s `reviewAndMaybeMerge()` | ✅ (local repro + real runs, e.g. 33956353815: `pr-gated` merged legitimate branches every run) |
+| W3: chaos-5's T1 (attribute downgrade) on a feature branch is rejected, `master`'s `.gitattributes` unchanged | same | ✅ (local repro + real runs) |
+| W3: chaos-5's T5 (hostile recipient) on a feature branch is always rejected/escalated, never merged | same (`recipientDiff` check) | ✅ (real runs: `pr-gated`'s `hostileRecipients` count was 0 in every run) |
+| W3: chaos-5's T3/T4 (relocation/rollback) on a feature branch is flagged, not silently merged | — | 🔲 **scope-cut, not built this pass** — `reviewAndMaybeMerge()`'s doc comment says so explicitly: no cryptographic or heuristic detector for T3/T4 exists yet, so a relocation/rollback that doesn't also trip T1/T5 is currently *accepted*, same as any other clean merge. In practice this hasn't yet produced a real violation either, because a relocated/rolled-back blob is still *valid ciphertext under `pr-gated`'s per-role branch isolation* (see the corrected mechanism above) — but that's incidental, not this check earning the ✅ above. |
+| W3: chaos-5 pushing straight to `master` is refused by the `pre-receive` hook, never reaches the orchestrator | `remote/entrypoint.mjs`'s hook + `attacker.mjs`'s `attackDirectMasterBypass` | ✅ (local repro + real runs: every `direct-master-bypass` attempt logged `rejected: true`) |
 | W3: the merge-review step evaluates against `master`'s pre-merge state, not the branch's own edited `.gitattributes` (the same-push downgrade-plus-plaintext attack) | `chaos/actors/driver.mjs`'s `reviewAndMaybeMerge()` (always `checkout -B review origin/BRANCH` fresh) | ✅ (local repro) |
-| W2: `working` accumulates chaos-5's attacks like W1, but they don't cross the promotion into `master` | full sandbox run, `SANDBOX_WORKFLOW=working-branch` | 🔲 (same review code path as W3, applied to one shared ref — not separately repro'd) |
-| A full real run under each of the three `SANDBOX_WORKFLOW` modes, verifier results compared against the "Predicted plaintext-leak shape" table above | GitHub Actions `chaos` job (matrix), `chaos-publish` job, `chaos/viewer/index.html`'s comparison panel | 🔲 |
+| W2: `working` accumulates chaos-5's attacks like W1 — confirmed, and worse than originally predicted: a shared branch is *not* a quarantined staging area, since anyone with ordinary read access to the remote can already see it (see the corrected mechanism above) | full sandbox runs, `SANDBOX_WORKFLOW=working-branch` | ✅ real violations every run; promotion-to-`master` review itself also confirmed working (rejects resumed correctly once a hostile recipient landed on `working`) |
+| A full real run under each of the three `SANDBOX_WORKFLOW` modes, verifier results compared against the "Predicted plaintext-leak shape" table above | GitHub Actions `chaos` job (matrix), `chaos-publish` job, `chaos/viewer/index.html`'s comparison panel | ✅ four real runs, three real bugs found and fixed along the way |
 
 ## Open Questions before implementation starts
 
