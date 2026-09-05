@@ -84,10 +84,25 @@ to detect it.
 
 1. **An attacker with code execution on an unlocked workstation.** They have the
    plaintext working tree. Nothing here helps.
-2. **Repository integrity and authenticity.** AES-256-GCM authenticates each
-   blob individually, which stops bit-flipping but not blob substitution,
-   history rewriting or force-pushing. Use signed commits and protected
-   branches; they are orthogonal and both are still required.
+2. **Repository integrity and authenticity, in general.** AES-256-GCM
+   authenticates each blob individually, which stops bit-flipping but not
+   blob substitution, history rewriting or force-pushing. Use signed
+   commits and protected branches; they are orthogonal and both are still
+   required. **Narrowed, not reversed, by
+   [08-multi-recipient.md](08-multi-recipient.md)'s "Commit signing":**
+   `verify` can check whether `HEAD`'s signer is a fingerprint already on
+   *this repository's own* recipient list — the one thing a platform's
+   generic "require signed commits" setting structurally cannot ask,
+   since it has no notion of securegit's recipients at all. That is a
+   narrow, specific addition (is this signer someone this repo already
+   trusts with its secrets), not a general integrity guarantee — it says
+   nothing about blob substitution, rollback, or force-push on its own,
+   and still needs the same server-side enforcement (a `pre-receive`
+   hook, a required check, or [the chaos sandbox's
+   orchestrator](../chaotests/03-orchestrator.md)) that signed commits and
+   protected branches always needed, for the reason [16](16-adversarial-integrity.md)'s
+   T1 section already states: a check a client can skip isn't a defense
+   against the adversary this document is actually about.
 3. **Availability.** An adversary who deletes the remote has deleted the remote.
 4. **Metadata.** Paths, sizes, commit messages, authorship, timestamps, branch
    names and the shape of the commit graph are all visible to A1. This is not a
@@ -152,3 +167,5 @@ belong in this repository at all.
 - [13](13-verify.md) — detecting a boundary that has stopped holding
 - [14](14-metadata-leakage.md) — the residue this model does not cover
 - [16](16-adversarial-integrity.md) — A6 and A7 in full
+- [08](08-multi-recipient.md) — "Commit signing", the narrow exception to
+  "authenticity is out of scope" above

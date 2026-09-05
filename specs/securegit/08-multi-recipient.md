@@ -18,7 +18,10 @@ surfaced a genuine ordering constraint (F21 below). `key rotate`/`reencrypt`
 ([10](10-cli-contract.md), [13](13-verify.md)) are all built now too — a
 removed recipient's warning is enforced, not just accurate, and both
 `verify --access` and `key list-recipients` report exactly who can read
-what. See "What this pass actually built" below.
+what. See "What this pass actually built" below. **Not yet built:**
+"Commit signing" below — a real, currently open gap (every attribution
+claim in this document is presently a self-reported string, not a proof)
+specified but not implemented.
 
 ## Core Principle
 
@@ -39,7 +42,8 @@ X25519 keypair.
   "fingerprint": "7c1e4a09b2d5f836",
   "publicKey":   "SGPUB1<base32>",
   "label":       "laptop",
-  "wrapped":     { "provider": "passphrase-file", "payload": { … } }
+  "wrapped":     { "provider": "passphrase-file", "payload": { … } },
+  "signingKey":  "ssh-ed25519 AAAA…"    ← optional, see "Commit signing" below
 }
 ```
 
@@ -99,6 +103,7 @@ it is well-reviewed, and a reader who knows `age` can audit it by inspection.
   "label": "laptop",
   "addedAt": "2026-09-01T10:04:11Z",
   "addedBy": "b30f92ac1e7d4405",
+  "signingKey": "ssh-ed25519 AAAA…",
   "keys": {
     "1": { "ephemeral": "…", "payload": "…" },
     "2": { "ephemeral": "…", "payload": "…" },
@@ -112,6 +117,8 @@ These files are **committed, tracked, and excluded from filtering**
 key and a ciphertext only the holder of the corresponding private key can open.
 Storing them in the repository means the answer to "how do I get the key on my
 new laptop" is `git clone` followed by one command, with no infrastructure.
+`signingKey`, when present, is equally non-secret — a public key, same as the
+wrap `publicKey` above it — see "Commit signing" below for what it's for.
 
 ## Flows
 
@@ -191,16 +198,137 @@ Mitigations, in the order they are worth doing:
 
 1. **Confirm the fingerprint over a second channel.** Sixteen hex characters,
    read aloud, is the whole protocol. This is enough for the threat model.
-2. **Commit signing.** The `add-recipient` commit is signed, so adding a
-   recipient is attributable and reviewable in the history like any other
-   change. `addedBy` records which identity performed it.
+2. **Commit signing — see below.** `addedBy` records which identity's
+   *self-reported* fingerprint performed the add, and `verify --access`
+   surfaces it — but nothing before this spec's "Commit signing" section
+   made that claim provable rather than typed. Left inaccurate in earlier
+   drafts of this document, corrected here: attribution is only as strong
+   as its weakest link, and a plain `git config user.name`/self-declared
+   `addedBy` isn't a signature.
 3. Not doing: a web of trust, or a signature chain over recipient files. It
    would be real work, and the fingerprint-over-a-second-channel step it
    replaces takes ten seconds.
 
 `verify` ([13](13-verify.md)) reports the current recipient list with
 fingerprints and the commit that added each, so "who can read this repository"
-is answerable from the history rather than from memory.
+is answerable from the history rather than from memory — **provably**, once
+commit signing (below) is in place; self-reported until then.
+
+## Commit signing — closing the attribution gap
+
+**Status: SPEC ONLY — NOT IMPLEMENTED.** Every attribution claim described
+above and in [13](13-verify.md) — `addedBy`, `git blame`, `git log`'s author
+field — is, today, a plain string written by whoever ran the command, from
+local state they fully control. Nothing proves it. This section specifies
+the fix; it is not built yet (`src/identity.ts` has no signing keypair,
+`src/verify.ts` has no signature check).
+
+### Why this is a separate keypair, not the existing one
+
+`identity.ts`'s X25519 keypair exists for one job: Diffie-Hellman key
+agreement, to wrap an RMK ([05](05-key-hierarchy.md)). X25519 keys cannot
+sign — that needs a different algorithm (Ed25519/EdDSA). Signing is
+therefore a **second, optional keypair** per identity, recorded alongside
+the existing one:
+
+```
+~/.securegit/identity.json
+{
+  … everything above, unchanged …
+  "signingKey": "ssh-ed25519 AAAA…"   ← the *public* half only; the private
+                                         half is whatever local file git's
+                                         own `user.signingkey` already
+                                         points at — securegit stores a
+                                         reference, not a second copy
+}
+```
+
+Deliberately **not** an SSH *transport* credential — this key is never
+presented to any server for authentication, never used to open a
+connection, and works identically regardless of whether the remote is
+`git://`, `https://`, or anything else. `ssh-ed25519` here names the key
+*encoding* git's own commit-signing feature borrows (`git config
+gpg.format ssh`), not a relationship to git's SSH transport protocol.
+
+### `identity init`'s new default behaviour
+
+No new flag needed for the safe half of this — detecting an *existing*
+signing key is read-only and happens automatically:
+
+```
+securegit identity init [--label <label>]
+  → (as today) generates the X25519 wrap keypair
+  → checks `git config --get user.signingkey` locally
+      found it   → records that public key's reference in identity.json,
+                    no prompt — reading and remembering a public key that
+                    already exists is not a new secret coming into being
+      not found  → prints: "No signing key found. Generate one with
+                    `identity init --generate-signing-key`, or set one with
+                    `git config user.signingkey <path>` and re-run." Does
+                    *not* generate one silently — creating new key
+                    material always needs an explicit ask, same principle
+                    `init`/`install` already follow elsewhere in this CLI.
+```
+
+`--generate-signing-key` generates a fresh Ed25519 SSH-format keypair
+(`ssh-keygen`-equivalent) when none exists; a no-op with a note if one is
+already recorded, never a silent overwrite.
+
+`key add-recipient` gains an optional `--signing-key <ssh-public-key>`,
+recorded in the recipient file the same way the existing public key is —
+also optional, also detected-not-forced, so a recipient added before this
+existed, or one who never sets up signing, simply has no `signingKey`
+field and is treated exactly as today (see "What this checks" below for
+what that means for enforcement).
+
+### What this checks — and, precisely, what it doesn't
+
+**The rule:** every commit reaching a protected place must be signed, and
+by a fingerprint already on the recipient list. Both halves matter —
+"signed by *someone*" is not the check; GitHub's own native "require
+signed commits" already proves that much and doesn't need securegit's
+help. The half only securegit can check is whether the signer is someone
+*this repository's own trust model* already recognises, which no
+platform's generic signed-commit requirement knows how to ask.
+
+This single rule is deliberately general, not attack-specific — it
+doesn't need to know what T1/T3/T4/T5 look like individually. A signer
+who was never added as a recipient can't produce a valid signature under
+any registered key, so a hostile commit is filtered out by *identity*,
+regardless of which of the catalogued attacks (or an uncatalogued future
+one) it happens to be. See
+[16-adversarial-integrity.md](16-adversarial-integrity.md) for how this
+changes that catalogue's own table.
+
+**Where enforcement can and can't happen — the same split as everywhere
+else in this project:**
+- *Detection* (`securegit verify`, [13](13-verify.md)) can run in every
+  repository, by default, no flag — reporting is free and needs no
+  server.
+- *Blocking* an unsigned or wrong-signer commit before it lands still
+  needs something a client can't opt out of: a self-hosted `pre-receive`
+  hook, a platform's required status check, or (self-hosted, no server
+  auth changes needed) the chaos sandbox's orchestrator review
+  ([03-orchestrator.md](../chaotests/03-orchestrator.md)). A client-side
+  check alone is the same "convenience, not defense" limit
+  [16](16-adversarial-integrity.md)'s T1 section already states for
+  `pre-push` hooks — a hostile pusher can simply not run it.
+
+**Two cases this rule must not silently break:**
+- **A repository with 0 or 1 recipients checks nothing.** There is no one
+  else to impersonate — the rule only starts meaning anything once a
+  second party has access at all. A brand-new `securegit init` with no
+  recipients added yet (this project's own Quickstart) is unaffected.
+- **History predating this feature is never retroactively judged.**
+  Exactly like GitHub's "require signed commits" only applies to commits
+  made after it's turned on, this only ever evaluates *new* commits going
+  forward — an orchestrator review only ever looks at what's being
+  proposed now, never re-validates what's already in `master`'s history.
+  The base `verify` check is scoped the same way, for the same reason
+  [13](13-verify.md)'s own `L6` finding ("plaintext committed before
+  adoption") is a `--history`-only, non-blocking finding, not something
+  the everyday check treats as a failure — an old repository adopting
+  this does not need to retroactively sign years of prior commits.
 
 ## What this pass actually built
 
@@ -412,6 +540,12 @@ add-recipient`/`remove-recipient`, and a second path inside `unlock`.
 | Removed recipient cannot read post-rotation blobs | `src/git.integration.test.ts` | `identities/` | ✅ |
 | Recipient files are never filtered | `src/install.test.ts` | — | ✅ |
 | Removing the last recipient is refused | `src/recipients.test.ts` | — | N/A — deliberately not built; see "What this pass actually built" above for why a hard refusal was reconsidered and rejected, not just deferred |
+| `identity init` detects an existing local `user.signingkey` and records it, no prompt | `src/identity.test.ts` | — | 🔲 spec only, see "Commit signing" |
+| `identity init` does not silently generate a signing key when none is found | `src/cli.test.ts` | — | 🔲 spec only |
+| `identity init --generate-signing-key` creates one only when none is already recorded | `src/identity.test.ts` | — | 🔲 spec only |
+| `key add-recipient --signing-key` records the recipient's signing public key | `src/recipients.test.ts` | — | 🔲 spec only |
+| `verify` reports an unsigned/wrong-signer commit only once 2+ recipients exist; a no-op at 0–1 | `src/verify.test.ts` | — | 🔲 spec only |
+| `verify`'s signing check never evaluates history predating adoption (base form, not `--history`) | `src/verify.test.ts` | — | 🔲 spec only |
 
 ## Relationship to Other Specs
 
@@ -419,4 +553,10 @@ add-recipient`/`remove-recipient`, and a second path inside `unlock`.
 - [06](06-key-provider-port.md) — what protects the identity private key
 - [07](07-unlock-session.md) — machine identities for CI
 - [09](09-rotation-recovery.md) — why removal requires rotation
-- [16](16-adversarial-integrity.md) — a hostile `add-recipient` commit
+- [16](16-adversarial-integrity.md) — a hostile `add-recipient` commit,
+  and why "commit signing" now closes it structurally rather than only
+  making it reviewable
+- [13](13-verify.md) — where the signing check surfaces as a check/finding
+- [../chaotests/03-orchestrator.md](../chaotests/03-orchestrator.md) — the
+  chaos sandbox's orchestrator, the first place this check is meant to
+  actually run

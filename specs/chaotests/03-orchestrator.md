@@ -91,6 +91,17 @@ fetch-every-branch fix hadn't landed yet — fourth run (33956353815)
 confirmed it resolved:** `pr-gated` reached `hardInvariantsHeld: true`
 outright, all three invariants clean.
 
+**Since then: commit signing (🔲 spec only, not yet implemented).** §"The
+orchestrator's review, precisely" point 5, and
+[08-multi-recipient.md](../securegit/08-multi-recipient.md)'s "Commit
+signing", specify a further check — every commit reaching `master` must
+be signed by a fingerprint already on the recipient list — found to
+subsume the T3/T4 gap this document originally scoped out ("not built
+this pass, deliberately") once it became clear the identity question is
+simpler and more general than trying to detect each content shape
+individually. Not yet built; tracked the same way every other spec-only
+piece in this document is.
+
 ## Core Principle
 
 > Same boundary as everywhere else in this project
@@ -178,35 +189,41 @@ under W2) and `master`'s current tip as the base:
    `install` just as well as an attacker who removed the line on purpose,
    which is the whole point of [16](../securegit/16-adversarial-integrity.md)'s
    "accident and attack have the same signature and the same detection."
-4. **T5 — hostile recipient: never auto-accept, always escalate.** Any
-   change under `.securegit/recipients/**` is rejected by the orchestrator
-   unconditionally, not evaluated for plausibility. This is a deliberate
-   floor, not a missing feature:
+4. **T5 — hostile recipient: never auto-accept, always escalate — and,
+   once commit signing exists, rejected outright before it even reaches
+   that escalation.** Any change under `.securegit/recipients/**` is
+   rejected by the orchestrator unconditionally, not evaluated for
+   plausibility. This is a deliberate floor, not a missing feature:
    [16](../securegit/16-adversarial-integrity.md) is explicit that "there
    is no cryptographic fix" for recipient trust and that this is "a
    code-review problem with a detector attached" — an automated check has
    no way to distinguish `label: "onboarding new hire"` from chaos-5's own
    `label: 'legit-looking-refactor'` (see `chaos/agents/attacker.mjs`'s
    `attackT5_hostileRecipient`, which uses exactly that plausible label).
-   The orchestrator's honest contribution here is forcing every recipient
-   change through a human, every time, not weighing in on which ones are
-   safe.
-5. **T3/T4 — relocation and rollback: not built this pass, deliberately.**
-   The design intent (still worth keeping as a target) was to flag — not
-   silently accept, not reject outright — a blob already reachable in
-   `master`'s history under a protected path reappearing verbatim at a
-   *different* path (T3), or a protected path's merge-result blob matching
-   an *older*, already-superseded blob for that same path rather than
-   continuing forward from the branch's own edit history (T4). The actual
-   implementation (`reviewAndMaybeMerge()` in `chaos/actors/driver.mjs`)
-   doesn't build this detector — a relocation or rollback that doesn't also
-   trip the T1/T5 checks above is currently accepted like any other clean
-   merge, an explicitly documented gap (see the Test Cases table), not an
-   oversight. [16](../securegit/16-adversarial-integrity.md) already states
-   the honest ceiling here regardless: "there is no cryptographic fix...
-   signed commits" is the actual answer to T3/T4, and even a built version
-   of this check would only ever be a heuristic subset of that, not a
-   replacement.
+   Point 5 below adds a check that catches this *specific* attacker's
+   attempt before the escalation logic even runs (chaos-5 was never a
+   recipient, so it can't sign at all) — real value, but it doesn't retire
+   this floor: a signature only proves *who* committed something, never
+   *whether* the recipient they're legitimately adding should be trusted,
+   which is still exactly the human question this point exists to force.
+5. **Commit signing — one general check, not a T3/T4-specific detector
+   (🔲 spec only, both halves — [08-multi-recipient.md](../securegit/08-multi-recipient.md)'s
+   "Commit signing" and this section).** Every commit unique to the
+   proposed ref (`git log origin/master..<sha>`) must be signed, and by a
+   fingerprint already present in `master`'s own `.securegit/recipients/`
+   — reject the whole merge otherwise. This was originally scoped as "not
+   built this pass, deliberately" specifically for T3/T4 (flag a
+   relocated/rolled-back blob) — reconsidered once it became clear the
+   *identity* question is simpler and more general than the *content*
+   question: an attacker who was never added as a recipient can't produce
+   a valid signature under any registered key, so this one check rejects
+   T1/T3/T4/T5 alike, and anything else an attacker without a registered
+   identity might try, without needing to recognize the attack shape at
+   all. [16](../securegit/16-adversarial-integrity.md)'s own ceiling
+   still holds precisely: "there is no cryptographic fix" for the
+   *content itself* — a relocated blob is still genuinely valid
+   ciphertext — this check works on the *commit*, not the blob, which is
+   a different, narrower, and actually closeable question.
 6. **Explicitly not this orchestrator's job.** General secret-scanning,
    static analysis, and "does this look like malware" are already this
    project's own required checks on real `master`
@@ -219,12 +236,13 @@ under W2) and `master`'s current tip as the base:
    in a diff for anything to review. A merge-request reviewer, real or
    simulated, only ever sees what got committed.
 7. **Accept or reject, recorded, never silent.** Passing every check above
-   merges the proposed ref into `master` and pushes; failing any of 2-4
-   rejects outright (`master` untouched); a T3/T4 flag from 5 merges only
-   after being marked reviewed (deferred to the Open Questions section —
-   real human review has no simulated equivalent, so the sandbox's initial
-   version most likely treats "flagged" the same as "rejected," see below).
-   Every outcome is a `record('action', …)` event in the existing
+   merges the proposed ref into `master` and pushes; failing any of 2–5
+   rejects outright, `master` untouched — no separate "flagged" state:
+   point 5's reconsideration (a hard identity check, not a content
+   heuristic) means there's no longer a middle "looks suspicious, ask a
+   human" outcome this sandbox would need to simulate without a human in
+   the loop, which the original T3/T4 design (see point 5's own history)
+   would have needed. Every outcome is a `record('action', …)` event in the existing
    `report.jsonl` shape (`chaos/lib/log.mjs`) — no schema change, just new
    message text (`merged <ref> onto master`, `rejected <ref>: <reason>`) —
    so [02](02-viewer.md)'s replay viewer picks these up as ordinary
@@ -448,7 +466,9 @@ Restated from [01](01-sandbox.md)'s own guardrails, extended for this spec:
 | W3: a clean collaborator feature branch is merged to `master` | `chaos/actors/driver.mjs`'s `reviewAndMaybeMerge()` | ✅ (local repro + real runs, e.g. 33956353815: `pr-gated` merged legitimate branches every run) |
 | W3: chaos-5's T1 (attribute downgrade) on a feature branch is rejected, `master`'s `.gitattributes` unchanged | same | ✅ (local repro + real runs) |
 | W3: chaos-5's T5 (hostile recipient) on a feature branch is always rejected/escalated, never merged | same (`recipientDiff` check) | ✅ (real runs: `pr-gated`'s `hostileRecipients` count was 0 in every run) |
-| W3: chaos-5's T3/T4 (relocation/rollback) on a feature branch is flagged, not silently merged | — | 🔲 **scope-cut, not built this pass** — `reviewAndMaybeMerge()`'s doc comment says so explicitly: no cryptographic or heuristic detector for T3/T4 exists yet, so a relocation/rollback that doesn't also trip T1/T5 is currently *accepted*, same as any other clean merge. In practice this hasn't yet produced a real violation either, because a relocated/rolled-back blob is still *valid ciphertext under `pr-gated`'s per-role branch isolation* (see the corrected mechanism above) — but that's incidental, not this check earning the ✅ above. |
+| W3: chaos-5's T3/T4 (relocation/rollback) on a feature branch is rejected via the commit-signing check (§5), not silently merged | `chaos/actors/driver.mjs`'s `reviewAndMaybeMerge()` | 🔲 **depends on commit signing, itself spec only** — until then, a relocation/rollback that doesn't also trip T1/T5 is *accepted*, same as any other clean merge. In practice this hasn't yet produced a real violation either, because a relocated/rolled-back blob is still *valid ciphertext under `pr-gated`'s per-role branch isolation* (see the corrected mechanism above) — but that's incidental, not a substitute for this check. |
+| Commit signing: an unsigned commit, or one signed by a non-recipient, is rejected by the orchestrator regardless of what it changes | `chaos/actors/driver.mjs`'s `reviewAndMaybeMerge()` | 🔲 spec only |
+| Commit signing: a legitimate collaborator's properly-signed commit is unaffected, accepted as before | `chaos/actors/driver.mjs`'s `reviewAndMaybeMerge()` | 🔲 spec only |
 | W3: chaos-5 pushing straight to `master` is refused by the `pre-receive` hook, never reaches the orchestrator | `remote/entrypoint.mjs`'s hook + `attacker.mjs`'s `attackDirectMasterBypass` | ✅ (local repro + real runs: every `direct-master-bypass` attempt logged `rejected: true`) |
 | W3: the merge-review step evaluates against `master`'s pre-merge state, not the branch's own edited `.gitattributes` (the same-push downgrade-plus-plaintext attack) | `chaos/actors/driver.mjs`'s `reviewAndMaybeMerge()` (always `checkout -B review origin/BRANCH` fresh) | ✅ (local repro) |
 | W2: `working` accumulates chaos-5's attacks like W1 — confirmed, and worse than originally predicted: a shared branch is *not* a quarantined staging area, since anyone with ordinary read access to the remote can already see it (see the corrected mechanism above) | full sandbox runs, `SANDBOX_WORKFLOW=working-branch` | ✅ real violations every run; promotion-to-`master` review itself also confirmed working (rejects resumed correctly once a hostile recipient landed on `working`) |
@@ -456,14 +476,22 @@ Restated from [01](01-sandbox.md)'s own guardrails, extended for this spec:
 
 ## Open Questions before implementation starts
 
-- **What happens to a T3/T4-flagged change with no human to review it?**
-  The sandbox has no human in the loop. Leaning toward treating "flagged"
-  as "rejected" for the sandbox's own purposes (the conservative choice,
-  and consistent with never silently merging something the design itself
-  says it can't fully vouch for) while documenting that a real deployment
-  would route the flag to an actual reviewer instead of auto-rejecting —
-  to be confirmed once the orchestrator's review logic is actually being
-  written, not decided in the abstract here.
+- **What happens to a T3/T4-flagged change with no human to review it? —
+  resolved by reframing, not by answering.** This question assumed T3/T4
+  needed a *content* heuristic with an uncertain, "looks suspicious"
+  middle state. Once the check became identity-based (point 5: is this
+  commit signed by an already-known recipient) there's no middle state
+  to route anywhere — it's the same hard accept/reject as every other
+  check. The genuinely open question underneath this one is now about
+  *signing itself*, not about what to do with an uncertain verdict: how
+  does a repository handle a legitimate collaborator who hasn't set up a
+  signing key yet (see [08-multi-recipient.md](../securegit/08-multi-recipient.md)'s
+  "two cases this rule must not silently break")? For the sandbox
+  specifically, likely: every legitimate actor's container generates a
+  signing key at bootstrap and registers it (same shared-volume mechanism
+  the keyring already uses), so this doesn't need answering in the
+  abstract, only replicated in `chaos/actors/driver.mjs` once commit
+  signing is actually being implemented.
 - **One driver file or a new one — resolved: one file.** `chaos/actors/driver.mjs`
   already branched on `SANDBOX_ROLE`; the review logic turned out to
   reuse enough of `operatorRound()`'s surroundings (`pullOnce()`, `git()`,
@@ -496,7 +524,7 @@ Restated from [01](01-sandbox.md)'s own guardrails, extended for this spec:
   spec extends rather than replaces, and the real 28-violation run this
   spec's own reasoning is grounded in
 - [02](02-viewer.md) — the replay viewer that will need label text for
-  `merged`/`rejected`/`flagged` events, not a schema change
+  `merged`/`rejected` events, not a schema change
 - [../securegit/01-threat-model.md](../securegit/01-threat-model.md) — A6/A7,
   and "repository integrity and authenticity... signed commits and
   protected branches... orthogonal and both are still required," which
@@ -505,3 +533,8 @@ Restated from [01](01-sandbox.md)'s own guardrails, extended for this spec:
   the T1/T3/T4/T5 catalogue the orchestrator's checks are built from, and
   the "recommended, not built" server-side enforcement note this spec
   finally specifies precisely enough to build
+- [../securegit/08-multi-recipient.md](../securegit/08-multi-recipient.md) —
+  "Commit signing," the identity keypair and recipient-file field this
+  spec's point 5 depends on, none of it built yet
+- [../securegit/13-verify.md](../securegit/13-verify.md) — `verify`'s own,
+  narrower (`HEAD`-only) half of the same signature check

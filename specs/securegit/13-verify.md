@@ -7,14 +7,17 @@ that it is still switched on. `securegit verify` is the command that answers
 "has a protected file ever been committed in plaintext, and is this repository
 still configured to prevent it".
 
-**Status: IMPLEMENTED.** `src/verify.ts` implements the always-on
-configuration and index checks (L1–L3, L7–L10), the leak/advice content scan,
-`--access` (`accessReport()`), `--history` (`historyReport()`), and the
-single-recovery-path advisory (`recoveryPathStatus()`, also surfaced
+**Status: IMPLEMENTED, ONE CHECK SPEC-ONLY.** `src/verify.ts` implements the
+always-on configuration and index checks (L1–L3, L7–L10), the leak/advice
+content scan, `--access` (`accessReport()`), `--history` (`historyReport()`),
+and the single-recovery-path advisory (`recoveryPathStatus()`, also surfaced
 directly by `securegit status`) — all wired into `src/cli.ts` as
 `securegit verify [--access|--history] [--json]`. `--json` is built for all
 three forms: the report object itself, exactly as the module returns it,
 `JSON.stringify`'d to stdout. See "What this pass actually built" below.
+**Not yet built:** L11 / `commit-signed-by-recipient` — see "Authenticity"
+below and [08-multi-recipient.md](08-multi-recipient.md)'s "Commit signing"
+for the full design.
 
 ## Core Principle
 
@@ -37,6 +40,7 @@ three forms: the report object itself, exactly as the module returns it,
 | L8 | `text` / `ident` / `working-tree-encoding` on a protected path | inherited `.gitattributes` | attribute check |
 | L9 | Keyring or session inside the worktree | `HOME` pointed at the repository | path check |
 | L10 | Only custodial providers remain | KMS added, passphrase removed | provider check |
+| L11 | `HEAD` unsigned, or signed by a non-recipient | attribution was never provable to begin with | authenticity check (🔲 spec only) |
 
 L4 is the one that bites in practice. Nothing fails. The commit succeeds. The
 push succeeds. The file is in CodeCommit in plaintext and will stay there.
@@ -97,6 +101,53 @@ Four distinct findings come out of `verify`
   `path` is the literal string `(repository)`, since this is a property of
   the repository as a whole, not any one file — the only `Finding` this is
   true for.
+
+### Authenticity — HEAD's own commit, once 2+ recipients exist
+
+**Status: SPEC ONLY — NOT IMPLEMENTED.** See
+[08-multi-recipient.md](08-multi-recipient.md)'s "Commit signing" section
+for the full design (the new `signingKey` field, `identity init`'s new
+detect-or-ask behaviour, and why every attribution claim before this was
+a self-reported string, not a proof). This subsection is `verify`'s own
+half of it.
+
+```
+$ securegit verify
+  …
+  ✓  HEAD signed by a known recipient   ssh-ed25519 SHA256:… (7c1e4a09b2d5f836)
+```
+
+A new check, `commit-signed-by-recipient`: is the *current* `HEAD`
+commit's signature (if any) valid, and does it belong to a fingerprint
+already present in `.securegit/recipients/`? Deliberately narrow in scope,
+for two reasons stated precisely rather than left implicit:
+
+- **Checks only `HEAD` itself, not a history walk.** Cheap, and correctly
+  scoped to "always" the same way the content check above is — it never
+  evaluates commits that predate this feature existing, so an old
+  repository adopting this doesn't retroactively fail on years of
+  unsigned history (the same reasoning [L6](#what-can-go-wrong-quietly)
+  already established for plaintext-before-adoption). A *range* of
+  commits — "every commit this branch is proposing, not just its tip" —
+  is a different, broader question a merge reviewer needs to ask;
+  that's [the chaos sandbox orchestrator's](../chaotests/03-orchestrator.md)
+  job, not this check's.
+- **A no-op below two recipients.** With zero or one recipient there is
+  no second party to impersonate, so the check reports `ok: true`
+  unconditionally rather than demanding a solo user sign their own
+  commits to themselves.
+
+**What this does and doesn't prove.** A failing check here means either
+`HEAD` isn't signed at all, or it's signed by a key that isn't on the
+recipient list — both are the same finding, deliberately: "was this
+verifiably one of the people this repository already trusts" is the only
+question, not "is the signature merely valid" (a platform's own generic
+"require signed commits" already answers that half; this answers the half
+only securegit's own recipient list can). This is a **detection** check,
+same tier as everything else in this section — `verify` never blocks a
+push on its own; see [08](08-multi-recipient.md)'s "Where enforcement can
+and can't happen" for why closing this gap for real needs a server-side
+gate, not a client-side report.
 
 ### History — `--history`
 
@@ -399,6 +450,11 @@ Scope decisions made building it, and why:
 | `verify --access --json` writes the `AccessReport` shape to stdout | `src/cli.test.ts` | — | ✅ |
 | `verify --history --json` writes the `HistoryReport` shape to stdout, same exit code | `src/cli.test.ts` | — | ✅ |
 | `verify` runs without a key present | `src/verify.test.ts` | `repo-protected/` | ✅ |
+| `commit-signed-by-recipient` passes when `HEAD` is signed by a registered recipient's key | `src/verify.test.ts` | — | 🔲 spec only |
+| `commit-signed-by-recipient` fails when `HEAD` is unsigned, once 2+ recipients exist | `src/verify.test.ts` | — | 🔲 spec only |
+| `commit-signed-by-recipient` fails when `HEAD` is signed by a key not on the recipient list | `src/verify.test.ts` | — | 🔲 spec only |
+| `commit-signed-by-recipient` is `ok: true` unconditionally with 0 or 1 recipients | `src/verify.test.ts` | — | 🔲 spec only |
+| `commit-signed-by-recipient` never evaluates commits older than `HEAD` (no retroactive failure) | `src/verify.test.ts` | — | 🔲 spec only |
 
 ## Relationship to Other Specs
 
@@ -407,3 +463,8 @@ Scope decisions made building it, and why:
 - [12](12-diff-merge.md) — the textconv cache, checked here
 - [15](15-failure-modes.md) — turning a finding into a next step
 - [16](16-adversarial-integrity.md) — the attacks this detects, and the ones it cannot
+- [08](08-multi-recipient.md) — "Commit signing", the full design behind
+  the `commit-signed-by-recipient` check
+- [../chaotests/03-orchestrator.md](../chaotests/03-orchestrator.md) — the
+  broader, per-commit-range version of this check a merge reviewer needs,
+  which is deliberately not this check's job

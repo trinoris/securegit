@@ -32,9 +32,9 @@ the real protocol.
 |---|---|---|---|---|
 | T1 | Attribute downgrade | push access | next commit of a path lands in plaintext | `verify` ([13](13-verify.md)) — **v1** |
 | T2 | Local filter substitution | local account access | `clean` becomes `cat` | nothing; local access is game over |
-| T3 | Blob relocation | push access | ciphertext moved to a path where its plaintext is dangerous | `bindPath`, signed commits |
-| T4 | Blob rollback | push access | a path silently reverts to an older secret | signed commits, branch protection |
-| T5 | Hostile recipient | push access + a merged commit | attacker receives every future generation | `verify --access`, review — **v1** |
+| T3 | Blob relocation | push access | ciphertext moved to a path where its plaintext is dangerous | `bindPath`; commit signing against a recipient list closes it structurally where a merge reviewer runs it — 🔲 spec only |
+| T4 | Blob rollback | push access | a path silently reverts to an older secret | branch protection; commit signing against a recipient list, same as T3 — 🔲 spec only |
+| T5 | Hostile recipient | push access + a merged commit | attacker receives every future generation | `verify --access`, review — **v1**; commit signing against a recipient list rejects it at the source — 🔲 spec only |
 | T6 | Recovery theft | both halves of an export | full, permanent, invisible read access | split storage, export log — **v1** |
 | T7 | Session theft | code execution as the user | the master key | `0600`, tmpfs, TTL — **v1** |
 | T8 | Offline passphrase attack | the keyring file | the master key | scrypt cost, length floor — **v1** |
@@ -203,6 +203,26 @@ and protected branches. `securegit` states the limit rather than implying the
 authentication tag covers more than it does — a per-blob GCM tag proves *this
 ciphertext was produced by a key holder*, not *this ciphertext belongs here*.
 
+**Narrowed further by commit signing (🔲 spec only — [08-multi-recipient.md](08-multi-recipient.md)'s
+"Commit signing"), where a merge reviewer actually runs it.** T3/T4 never
+had a *content* signature to check — the relocated/rolled-back blob is
+genuinely valid ciphertext, produced by a real key holder, just sitting
+somewhere it shouldn't. What a reviewer *can* check is whether the
+**commit that moved it there** is signed by an already-known recipient —
+that's identity-based, not content-based, so it doesn't need to know T3
+and T4 apart, or even that they're the specific attacks being attempted.
+An attacker who was never added as a recipient can't produce a valid
+signature under any registered key, so their relocation/rollback commit
+is filtered out the same way an unsigned or wrong-signer commit doing
+anything else would be. This still needs a reviewer that actually checks
+it (a merge gate, not `verify`'s own `HEAD`-only check — see
+[13-verify.md](13-verify.md)'s "Authenticity" section for why those are
+different scopes), so it doesn't retire this section's opening claim —
+the envelope itself still cannot bind *where in history* a blob sits, and
+"nothing in the envelope" still helps T4 directly. What changes is that
+the blob no longer has to be judged on its own: the *commit* carrying it
+can be, by an identity check the envelope was never meant to do.
+
 ## T5 — hostile recipient
 
 `.securegit/recipients/` is committed, so adding a recipient is a commit. A
@@ -212,8 +232,22 @@ attacker nothing until the next `key rotate` wraps the new generation for them.
 
 - `verify --access` lists every recipient with the commit that added it.
 - `key rotate` prints the recipient list and requires confirmation of the count.
-- `addedBy` records the identity that performed the addition.
-- Signed commits make the addition attributable.
+- `addedBy` records the identity that performed the addition — a
+  self-reported string, not a proof, until commit signing (next
+  paragraph) exists to check it against.
+- **Commit signing (🔲 spec only) would reject the addition outright,
+  before merge, rather than only making it reviewable after.** An
+  attacker adding `attacker.json` was, by definition, never a recipient
+  before this commit — so if a reviewer requires every commit to be
+  signed by a fingerprint *already* on the recipient list, this commit
+  fails that check on its own, regardless of how plausible the
+  accompanying refactor looks. This is the general mechanism from
+  [08-multi-recipient.md](08-multi-recipient.md)'s "Commit signing" and
+  [13-verify.md](13-verify.md)'s new `commit-signed-by-recipient` check —
+  it isn't a T5-specific detector, it's the same identity check that also
+  narrows T3/T4 above, catching this one as a side effect of asking "is
+  this signer someone we already trust" rather than "does this look like
+  a hostile-recipient commit specifically."
 
 As built, `key rotate`'s confirmation is `--confirm-recipients <n>`, not a
 blind `--yes` — it has to name the *count* the operator expects, checked
@@ -356,6 +390,7 @@ requests ([11](11-filter-process.md)).
 | T3: relocated blob decrypts under `bindPath = false`, as documented | `src/envelope.test.ts` | — | ✅ |
 | T5: `verify --access` names the commit that added each recipient | `src/verify.test.ts` | — | ✅ |
 | T5: `rotate` requires confirmation of the recipient count | `src/cli.test.ts` | — | ✅ |
+| T3/T4/T5: a commit signed by a fingerprint not on the recipient list is rejected by a merge review, regardless of attack shape | [chaos sandbox orchestrator](../chaotests/03-orchestrator.md) | — | 🔲 spec only |
 | T6: the recovery file alone does not decrypt without the code | `src/recovery.test.ts` | — | ✅ |
 | T6: an export appends to the committed recovery log, not the code or file | `src/recovery.test.ts` | — | ✅ |
 | T7: session file with loose permissions is deleted, not used | `src/session.test.ts` | — | ✅ |
@@ -380,3 +415,8 @@ requests ([11](11-filter-process.md)).
 - [09](09-rotation-recovery.md) — the recovery file/code split behind T6
 - [12](12-diff-merge.md) — the merge driver, source of the `.orig` residue
 - [13](13-verify.md) — the detector for T1, T5 and T12
+- [08](08-multi-recipient.md) — "Commit signing", the one mechanism that
+  now narrows T3, T4 *and* T5 at once
+- [../chaotests/03-orchestrator.md](../chaotests/03-orchestrator.md) —
+  where a merge reviewer actually runs the signing check against a real
+  attacker
