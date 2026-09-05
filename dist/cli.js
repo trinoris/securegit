@@ -22,7 +22,7 @@ import { LockedError, clean, smudge, textconv } from './filter.js';
 import { EnvelopeError, parseEnvelope, seal, unseal } from './envelope.js';
 import { verify, verifyExitCode, accessReport, historyReport, metadataReport, recoveryPathStatus, TEXTCONV_NOTES_REF, checkAttr, listTrackedPaths, readIndexBlob, } from './verify.js';
 import { merge } from './merge.js';
-import { IdentityError, createIdentity, decodePublicKey, identityFingerprint, identityPath, readIdentityFile, unlockIdentity, writeIdentityFile, } from './identity.js';
+import { IdentityError, createIdentity, decodePublicKey, detectLocalSigningKey, generateSigningKeyPair, identityFingerprint, identityPath, readIdentityFile, signingKeyFingerprint, signingKeyPath, unlockIdentity, writeIdentityFile, } from './identity.js';
 import { RecipientError, appendRemovedRecipientLogEntry, recipientPath, recipientsDir, readRecipientFile, removedRecipientsLogPath, unlockFromRecipientFile, wrapAllGenerations, wrapForRecipient, writeRecipientFile, } from './recipients.js';
 import { RecoveryError, appendRecoveryLogEntry, exportRecovery, formatRecoveryCode, generateExportId, importRecovery, parseRecoveryCode, readRecoveryFile, recoveryFilePath, recoveryLogPath, writeRecoveryFile, } from './recovery.js';
 import { FilterProcessServer } from './process.js';
@@ -462,6 +462,7 @@ async function cmdStatus(args, io) {
 async function cmdIdentityInit(args, io) {
     const labelIdx = args.indexOf('--label');
     const label = labelIdx !== -1 ? (args[labelIdx + 1] ?? '') : '';
+    const generateSigningKeyFlag = args.includes('--generate-signing-key');
     const path = identityPath(io.home);
     try {
         await readIdentityFile(path);
@@ -481,10 +482,33 @@ async function cmdIdentityInit(args, io) {
         io.stderr(e.message);
         return EXIT_USAGE;
     }
+    // Commit signing (specs/securegit/08-multi-recipient.md, "Commit
+    // signing"): detecting an existing key is unconditional — read-only,
+    // nothing new comes into being, so it needs no flag and no confirmation.
+    // Generating one is opt-in, and only when detection found nothing to
+    // use instead — matches "never silently create new key material"
+    // everywhere else this CLI touches key state (`init`, `install`).
+    let signingKeyNote;
+    const detectedSigningKey = await detectLocalSigningKey(io.cwd, io.home);
+    if (detectedSigningKey) {
+        created.file.signingKey = detectedSigningKey;
+        signingKeyNote = `\n  signing key: detected (${signingKeyFingerprint(detectedSigningKey)})`;
+    }
+    else if (generateSigningKeyFlag) {
+        const genPath = signingKeyPath(io.home);
+        const generated = await generateSigningKeyPair(genPath);
+        created.file.signingKey = generated.publicKey;
+        signingKeyNote = `\n  signing key: generated at ${genPath} (${signingKeyFingerprint(generated.publicKey)})`;
+    }
+    else {
+        signingKeyNote =
+            '\n  signing key: none found — run `securegit identity init --generate-signing-key`,' +
+                '\n               or `git config user.signingkey <path>` and re-run';
+    }
     await writeIdentityFile(path, created.file);
     io.info(`securegit: identity created\n` +
         `  fingerprint: ${created.file.fingerprint}\n` +
-        `  public key:  ${created.file.publicKey}\n` +
+        `  public key:  ${created.file.publicKey}${signingKeyNote}\n` +
         `  next:        share the public key above with someone who already has access`);
     return EXIT_OK;
 }
@@ -515,11 +539,13 @@ async function cmdIdentity(args, io) {
 async function cmdKeyAddRecipient(args, io) {
     const pubkeyArg = args.find((a) => !a.startsWith('--'));
     if (!pubkeyArg) {
-        io.stderr('usage: securegit key add-recipient <pubkey> [--label <label>]');
+        io.stderr('usage: securegit key add-recipient <pubkey> [--label <label>] [--signing-key <ssh-public-key>]');
         return EXIT_USAGE;
     }
     const labelIdx = args.indexOf('--label');
     const label = labelIdx !== -1 ? (args[labelIdx + 1] ?? '') : '';
+    const signingKeyIdx = args.indexOf('--signing-key');
+    const signingKeyArg = signingKeyIdx !== -1 ? args[signingKeyIdx + 1] : undefined;
     let recipientPublicKey;
     try {
         recipientPublicKey = decodePublicKey(pubkeyArg);
@@ -527,6 +553,21 @@ async function cmdKeyAddRecipient(args, io) {
     catch (e) {
         io.stderr(e.message);
         return EXIT_USAGE;
+    }
+    // Optional — specs/securegit/08-multi-recipient.md, "Commit signing".
+    // Validated up front (before ever touching keys/disk) the same way the
+    // primary pubkey is above: a malformed value refuses cleanly rather than
+    // writing a recipient file with a signing key nothing could ever match
+    // against.
+    let signingKeyFp = '';
+    if (signingKeyArg !== undefined) {
+        try {
+            signingKeyFp = signingKeyFingerprint(signingKeyArg);
+        }
+        catch (e) {
+            io.stderr(e.message);
+            return EXIT_USAGE;
+        }
     }
     const loaded = await loadKeys(io);
     if (!loaded.ok)
@@ -553,11 +594,13 @@ async function cmdKeyAddRecipient(args, io) {
         label,
         addedAt: (io.now ? io.now() : new Date()).toISOString(),
         addedBy,
+        ...(signingKeyArg !== undefined ? { signingKey: signingKeyArg } : {}),
         keys: wrapped,
     };
     await writeRecipientFile(recipientPath(io.cwd, fingerprint), file);
-    io.info(`securegit: added recipient ${fingerprint}${label ? ` (${label})` : ''}\n` +
-        `  action: git add .securegit/recipients && git commit && git push`);
+    io.info(`securegit: added recipient ${fingerprint}${label ? ` (${label})` : ''}` +
+        (signingKeyArg !== undefined ? `\n  signing key: ${signingKeyFp}` : '') +
+        `\n  action: git add .securegit/recipients && git commit && git push`);
     return EXIT_OK;
 }
 async function cmdKeyRemoveRecipient(args, io) {

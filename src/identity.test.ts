@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { execFile as execFileCb } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdtemp, rm, stat, readFile } from 'node:fs/promises';
+import { mkdtemp, rm, stat, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassphraseFileProvider } from './provider.js';
@@ -22,6 +22,7 @@ import {
   detectLocalSigningKey,
   generateSigningKeyPair,
   signingKeyFingerprint,
+  signingKeyPath,
   type IdentityFile,
 } from './identity.js';
 
@@ -193,6 +194,10 @@ describe('identityPath() / writeIdentityFile() / readIdentityFile()', () => {
     expect(identityPath(dir)).toBe(join(dir, '.securegit', 'identity.json'));
   });
 
+  it('signingKeyPath() resolves to ~/.securegit/signing_key', () => {
+    expect(signingKeyPath(dir)).toBe(join(dir, '.securegit', 'signing_key'));
+  });
+
   it('round-trips through disk', async () => {
     const { file } = await createIdentity('laptop', passphraseProvider());
     const path = identityPath(dir);
@@ -293,6 +298,18 @@ describe('detectLocalSigningKey()', () => {
     const { publicKey } = await generateSigningKeyPair(join(home, 'id_ed25519'));
     await execFile('git', ['config', 'user.signingkey', join(home, 'id_ed25519.pub')], { cwd: repoDir });
     await expect(detectLocalSigningKey(repoDir, home)).resolves.toBe(publicKey);
+  });
+
+  it('reads a real *global* signing key from the injected home, not the real developer machine one', async () => {
+    // The realistic case for identity init: a signing key is almost always
+    // configured globally (`git config --global`), not per-repo. This only
+    // passes if the git subprocess actually sees HOME=<the injected home>,
+    // not whatever HOME this test process itself happens to be running
+    // under — proving the isolation `home` is supposed to give tests (and
+    // any caller that legitimately differs from os.homedir()) actually
+    // holds, rather than being silently ignored.
+    await writeFile(join(home, '.gitconfig'), '[user]\n\tsigningkey = key::ssh-ed25519 AAAAglobal\n');
+    await expect(detectLocalSigningKey(repoDir, home)).resolves.toBe('ssh-ed25519 AAAAglobal');
   });
 
   it('reads the inline key:: form too', async () => {

@@ -216,6 +216,11 @@ export function identityPath(home: string): string {
   return join(home, '.securegit', 'identity.json');
 }
 
+/** Where `identity init --generate-signing-key` writes a new signing keypair (plus `.pub`). */
+export function signingKeyPath(home: string): string {
+  return join(home, '.securegit', 'signing_key');
+}
+
 /** Atomic (temp + rename) write, mode 0600 — the same discipline as `keyring.ts`'s master key. */
 export async function writeIdentityFile(path: string, file: IdentityFile): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
@@ -239,9 +244,23 @@ export async function readIdentityFile(path: string): Promise<IdentityFile> {
 // specs/securegit/08-multi-recipient.md, "Commit signing".
 // ---------------------------------------------------------------------------
 
-async function gitConfigGet(repoDir: string, key: string): Promise<string | null> {
+/**
+ * `user.signingkey` is realistically set globally (`git config --global`),
+ * not per-repo, which is exactly the lookup this needs `HOME` set
+ * correctly for — `git config --get`'s effective (no explicit scope flag)
+ * resolution reads `$HOME/.gitconfig` for the global layer, and without
+ * this override that would be *this process's* real `$HOME`, never the
+ * `home` a caller (a test, or any future caller with a legitimately
+ * different home) actually asked to look in. Confirmed missing by a
+ * failing test before this existed: an injected `home` with its own
+ * `.gitconfig` was silently ignored in favour of the real one.
+ */
+async function gitConfigGet(repoDir: string, key: string, home: string): Promise<string | null> {
   try {
-    const { stdout } = await execFile('git', ['config', '--get', key], { cwd: repoDir });
+    const { stdout } = await execFile('git', ['config', '--get', key], {
+      cwd: repoDir,
+      env: { ...process.env, HOME: home },
+    });
     return stdout.replace(/\n$/, '');
   } catch (e) {
     const err = e as { code?: number };
@@ -289,7 +308,7 @@ export async function resolveSigningKeyRef(
  * recording/generating one is not.
  */
 export async function detectLocalSigningKey(repoDir: string, home: string): Promise<string | null> {
-  const value = await gitConfigGet(repoDir, 'user.signingkey');
+  const value = await gitConfigGet(repoDir, 'user.signingkey', home);
   return resolveSigningKeyRef(value, home);
 }
 

@@ -458,6 +458,50 @@ describe('identity', () => {
     const h = harness();
     expect(await h.run(['identity', 'bogus'])).toBe(4);
   });
+
+  describe('commit signing (specs/securegit/08-multi-recipient.md, "Commit signing")', () => {
+    it('with nothing configured, writes no signingKey field and prints guidance, not a silent skip', async () => {
+      const h = harness();
+      expect(await h.run(['identity', 'init'])).toBe(0);
+      const file = JSON.parse(await readFile(join(home, '.securegit', 'identity.json'), 'utf8'));
+      expect(file.signingKey).toBeUndefined();
+      expect(h.infoText()).toContain('--generate-signing-key');
+    });
+
+    it('detects an already-configured local git signing key without any flag', async () => {
+      await execFile('git', ['init', '-q', dir]);
+      await execFile('ssh-keygen', ['-t', 'ed25519', '-f', join(home, 'existing'), '-N', '', '-C', 'x'], {});
+      const existingPub = (await readFile(join(home, 'existing.pub'), 'utf8')).trim();
+      await execFile('git', ['config', 'user.signingkey', join(home, 'existing.pub')], { cwd: dir });
+
+      const h = harness();
+      expect(await h.run(['identity', 'init'])).toBe(0);
+      const file = JSON.parse(await readFile(join(home, '.securegit', 'identity.json'), 'utf8'));
+      expect(file.signingKey).toBe(existingPub);
+    });
+
+    it('--generate-signing-key generates one when nothing was detected', async () => {
+      const h = harness();
+      expect(await h.run(['identity', 'init', '--generate-signing-key'])).toBe(0);
+      const file = JSON.parse(await readFile(join(home, '.securegit', 'identity.json'), 'utf8'));
+      expect(file.signingKey).toMatch(/^ssh-ed25519 /);
+      const onDisk = (await readFile(join(home, '.securegit', 'signing_key.pub'), 'utf8')).trim();
+      expect(onDisk).toBe(file.signingKey);
+    });
+
+    it('--generate-signing-key is a no-op when a key was already detected — detection wins, nothing generated', async () => {
+      await execFile('git', ['init', '-q', dir]);
+      await execFile('ssh-keygen', ['-t', 'ed25519', '-f', join(home, 'existing'), '-N', '', '-C', 'x'], {});
+      const existingPub = (await readFile(join(home, 'existing.pub'), 'utf8')).trim();
+      await execFile('git', ['config', 'user.signingkey', join(home, 'existing.pub')], { cwd: dir });
+
+      const h = harness();
+      expect(await h.run(['identity', 'init', '--generate-signing-key'])).toBe(0);
+      const file = JSON.parse(await readFile(join(home, '.securegit', 'identity.json'), 'utf8'));
+      expect(file.signingKey).toBe(existingPub);
+      await expect(readFile(join(home, '.securegit', 'signing_key.pub'), 'utf8')).rejects.toThrow();
+    });
+  });
 });
 
 describe('key add-recipient / key remove-recipient / unlock via a recipient file', () => {
@@ -480,6 +524,63 @@ describe('key add-recipient / key remove-recipient / unlock via a recipient file
     await h.run(['init']);
     await h.run(['unlock']);
     expect(await h.run(['key', 'add-recipient', 'not-a-public-key'])).toBe(4);
+  });
+
+  describe('add-recipient --signing-key (specs/securegit/08-multi-recipient.md, "Commit signing")', () => {
+    const SIGNING_KEY =
+      'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFiRUiOHgwdBMOAQXey7x3B4WS90jgI0kirS3hCm8xQF laptop';
+
+    it('records the recipient signing key alongside the existing fields', async () => {
+      const h = harness();
+      await h.run(['init']);
+      await h.run(['unlock']);
+      const otherHome = await mkdtemp(join(tmpdir(), 'securegit-cli-identity-'));
+      const other = harness({ home: otherHome });
+      await other.run(['identity', 'init']);
+      const identity = JSON.parse(await readFile(join(otherHome, '.securegit', 'identity.json'), 'utf8'));
+
+      expect(
+        await h.run(['key', 'add-recipient', identity.publicKey, '--signing-key', SIGNING_KEY]),
+      ).toBe(0);
+      const recipientFile = JSON.parse(
+        await readFile(join(dir, '.securegit', 'recipients', `${identity.fingerprint}.json`), 'utf8'),
+      );
+      expect(recipientFile.signingKey).toBe(SIGNING_KEY);
+    });
+
+    it('omitting --signing-key leaves the recipient exactly as before this feature — no field at all', async () => {
+      const h = harness();
+      await h.run(['init']);
+      await h.run(['unlock']);
+      const otherHome = await mkdtemp(join(tmpdir(), 'securegit-cli-identity-'));
+      const other = harness({ home: otherHome });
+      await other.run(['identity', 'init']);
+      const identity = JSON.parse(await readFile(join(otherHome, '.securegit', 'identity.json'), 'utf8'));
+
+      await h.run(['key', 'add-recipient', identity.publicKey]);
+      const raw = await readFile(
+        join(dir, '.securegit', 'recipients', `${identity.fingerprint}.json`),
+        'utf8',
+      );
+      expect(raw).not.toContain('signingKey');
+    });
+
+    it('exits usage on a malformed --signing-key, without writing a recipient file', async () => {
+      const h = harness();
+      await h.run(['init']);
+      await h.run(['unlock']);
+      const otherHome = await mkdtemp(join(tmpdir(), 'securegit-cli-identity-'));
+      const other = harness({ home: otherHome });
+      await other.run(['identity', 'init']);
+      const identity = JSON.parse(await readFile(join(otherHome, '.securegit', 'identity.json'), 'utf8'));
+
+      expect(
+        await h.run(['key', 'add-recipient', identity.publicKey, '--signing-key', 'not-a-key-line']),
+      ).toBe(4);
+      await expect(
+        readFile(join(dir, '.securegit', 'recipients', `${identity.fingerprint}.json`)),
+      ).rejects.toThrow();
+    });
   });
 
   it('remove-recipient exits usage when the file does not exist', async () => {

@@ -53,6 +53,8 @@ export declare function createIdentity(label: string, provider: KeyProvider): Pr
 /** The identity's private key, or `null` if no given provider can unwrap it — never throws. */
 export declare function unlockIdentity(file: IdentityFile, providers: KeyProvider[]): Promise<Buffer | null>;
 export declare function identityPath(home: string): string;
+/** Where `identity init --generate-signing-key` writes a new signing keypair (plus `.pub`). */
+export declare function signingKeyPath(home: string): string;
 /** Atomic (temp + rename) write, mode 0600 — the same discipline as `keyring.ts`'s master key. */
 export declare function writeIdentityFile(path: string, file: IdentityFile): Promise<void>;
 export declare function readIdentityFile(path: string): Promise<IdentityFile>;

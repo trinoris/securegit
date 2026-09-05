@@ -162,6 +162,10 @@ export async function unlockIdentity(file, providers) {
 export function identityPath(home) {
     return join(home, '.securegit', 'identity.json');
 }
+/** Where `identity init --generate-signing-key` writes a new signing keypair (plus `.pub`). */
+export function signingKeyPath(home) {
+    return join(home, '.securegit', 'signing_key');
+}
 /** Atomic (temp + rename) write, mode 0600 — the same discipline as `keyring.ts`'s master key. */
 export async function writeIdentityFile(path, file) {
     await mkdir(dirname(path), { recursive: true });
@@ -183,9 +187,23 @@ export async function readIdentityFile(path) {
 // Commit signing key — detection and generation.
 // specs/securegit/08-multi-recipient.md, "Commit signing".
 // ---------------------------------------------------------------------------
-async function gitConfigGet(repoDir, key) {
+/**
+ * `user.signingkey` is realistically set globally (`git config --global`),
+ * not per-repo, which is exactly the lookup this needs `HOME` set
+ * correctly for — `git config --get`'s effective (no explicit scope flag)
+ * resolution reads `$HOME/.gitconfig` for the global layer, and without
+ * this override that would be *this process's* real `$HOME`, never the
+ * `home` a caller (a test, or any future caller with a legitimately
+ * different home) actually asked to look in. Confirmed missing by a
+ * failing test before this existed: an injected `home` with its own
+ * `.gitconfig` was silently ignored in favour of the real one.
+ */
+async function gitConfigGet(repoDir, key, home) {
     try {
-        const { stdout } = await execFile('git', ['config', '--get', key], { cwd: repoDir });
+        const { stdout } = await execFile('git', ['config', '--get', key], {
+            cwd: repoDir,
+            env: { ...process.env, HOME: home },
+        });
         return stdout.replace(/\n$/, '');
     }
     catch (e) {
@@ -232,7 +250,7 @@ export async function resolveSigningKeyRef(value, home, readFileImpl = (p) => re
  * recording/generating one is not.
  */
 export async function detectLocalSigningKey(repoDir, home) {
-    const value = await gitConfigGet(repoDir, 'user.signingkey');
+    const value = await gitConfigGet(repoDir, 'user.signingkey', home);
     return resolveSigningKeyRef(value, home);
 }
 /**
