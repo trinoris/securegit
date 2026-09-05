@@ -2,7 +2,10 @@
 //   collaborator-a  bootstraps the repo, then edits+commits+pushes its own
 //                   file on a loop, same as collaborator-b
 //   collaborator-b  waits for collaborator-a's bootstrap, then the same loop
-//   operator        never edits files — runs unlock/status/verify/rotate
+//   operator        never edits secrets/ files — runs unlock/status/verify/
+//                   rotate, plus reconciling .gitattributes back to the
+//                   protected pattern list every round (T1 recovery — see
+//                   reconcileAttributes())
 // See specs/chaotests/01-sandbox.md.
 //
 // v1 scope: each collaborator edits only its own file (secrets/<role>.json)
@@ -27,6 +30,11 @@ const SHARED_READY = join(SHARED_DIR, 'bootstrap-ready');
 const BRANCH = process.env.BRANCH ?? 'main';
 const DURATION_SECONDS = Number(process.env.CHAOS_DURATION_SECONDS ?? 300);
 const HOME = process.env.HOME;
+// What `bootstrapAsCollaboratorA` protects at seed time, and what the
+// operator's `reconcileAttributes` keeps re-asserting every round — see
+// there for why one list serves both purposes.
+const PROTECTED_PATTERNS = ['secrets/**'];
+const GITATTRIBUTES_PATH = join(WORK_DIR, '.gitattributes');
 
 if (!ROLE) {
   say('SANDBOX_ROLE not set — nothing to do');
@@ -70,7 +78,7 @@ async function bootstrapAsCollaboratorA() {
   const alreadyInit = await exists(join(WORK_DIR, '.securegit', 'config.json'));
   if (!alreadyInit) {
     await record('action', 'securegit init', await securegit(['init'], { cwd: WORK_DIR }));
-    await record('action', 'securegit protect secrets/**', await securegit(['protect', 'secrets/**'], { cwd: WORK_DIR }));
+    await record('action', `securegit protect ${PROTECTED_PATTERNS.join(', ')}`, await securegit(['protect', ...PROTECTED_PATTERNS], { cwd: WORK_DIR }));
     // Must run before the seed files are ever `git add`ed — `.gitattributes`
     // alone only tells git *which* paths to filter; without this, no
     // `filter.securegit.clean` command is registered in `.git/config` at
@@ -198,9 +206,60 @@ async function collaboratorRound(n) {
   }
 }
 
+/**
+ * The operator's answer to T1 (16-adversarial-integrity.md): `protect` is
+ * idempotent (`install.ts`'s `updateGitattributes` only ever appends a
+ * pattern's line when it's missing), so re-asserting the full protected-
+ * pattern list every round is an ordinary GitOps-style reconciliation, not
+ * an "if attacked" special case — a no-op when `.gitattributes` already
+ * matches, a real repair the round after chaos-5's attribute-downgrade
+ * attack lands. This is exactly the automated enforcement
+ * 16-adversarial-integrity.md's T1 section documents as *not* shipped in
+ * the product itself (no `install --hooks`, no server-side `pre-receive`)
+ * — built here as the always-on ops process a real deployment would run
+ * alongside it, using only the existing `protect` primitive, not as a new
+ * CLI feature.
+ *
+ * Doesn't retroactively fix history: a blob some collaborator already
+ * committed unprotected during the window between the downgrade landing
+ * and this reconciling stays plaintext in that commit forever (rewriting
+ * history is a deliberate, disruptive incident-response action this loop
+ * must never take on its own) — this only bounds how long the *next*
+ * write stays exposed for.
+ */
+async function reconcileAttributes(n) {
+  const before = await readFile(GITATTRIBUTES_PATH, 'utf8').catch(() => '');
+  await securegit(['protect', ...PROTECTED_PATTERNS], { cwd: WORK_DIR });
+  const after = await readFile(GITATTRIBUTES_PATH, 'utf8').catch(() => '');
+  if (after === before) return; // already matched — the ordinary case, not worth logging every round
+
+  await git(['add', '.gitattributes'], { cwd: WORK_DIR, env: gitEnv() });
+  const commit = await git(
+    ['commit', '-m', 'operator: restore securegit attribute protection'],
+    { cwd: WORK_DIR, env: gitEnv() },
+  );
+  if (commit.code !== 0) {
+    await record('observation', `attribute reconcile: nothing to commit (round ${n})`, commit);
+    return;
+  }
+
+  let push = await git(['push', 'origin', BRANCH], { cwd: WORK_DIR, env: gitEnv() });
+  if (push.code !== 0) {
+    // Same ordinary push race `collaboratorRound` already handles — pull
+    // (merging whatever else landed since) and retry once.
+    const retryPull = await pullOnce();
+    if (retryPull.ok) {
+      push = await git(['push', 'origin', BRANCH], { cwd: WORK_DIR, env: gitEnv() });
+    }
+  }
+  await record('action', `restored .gitattributes protection (round ${n})`, { before, after, push });
+}
+
 async function operatorRound(n) {
   await securegit(['unlock'], { cwd: WORK_DIR });
   await pullOnce();
+
+  await reconcileAttributes(n);
 
   const status = await securegit(['status', '--json'], { cwd: WORK_DIR });
   await record('observation', `status (round ${n})`, { code: status.code, stdout: status.stdout.trim() });

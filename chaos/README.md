@@ -5,10 +5,12 @@ remote repo, three legitimate actors (`collaborator-a`, `collaborator-b`,
 `operator`), three chaos agents (`chaos-4-virus`, `chaos-5-attacker`,
 `chaos-6-infra`), and a `verifier` that audits the result.
 
-**Not run or verified by an AI session that built it** — Docker wasn't
-available in the environment this was written in. Read this as a
-first-pass implementation to try, not a known-working tool. See
-"Troubleshooting" below for what's most likely to need a second pass.
+**Update: since verified end-to-end via GitHub Actions' `chaos` job**,
+running real `docker compose` (not WSL, where it still isn't available in
+the environment this file was originally written in) — see
+[chaotests/01-sandbox.md](../specs/chaotests/01-sandbox.md)'s "Later
+correction" note. Local `docker compose` runs from WSL remain untested;
+see "Troubleshooting" below if that's where you're running this.
 
 ## Running it
 

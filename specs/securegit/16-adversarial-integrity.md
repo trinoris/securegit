@@ -110,6 +110,35 @@ This is a code-review problem with a detector attached — client-side tooling
 can make the detector convenient to run; only a server you control can make
 it mandatory.
 
+**Demonstrated: an always-on operator process closes the loop, bounded.**
+The chaos sandbox's `operator` role (`chaos/actors/driver.mjs`,
+[chaotests/01-sandbox.md](../chaotests/01-sandbox.md)) now re-runs `protect`
+against the full protected-pattern list every round —
+`reconcileAttributes()`, built entirely from the existing `protect`
+primitive (idempotent: a no-op when `.gitattributes` already matches),
+committing and pushing the restored line the round after chaos-5's
+downgrade lands. This is not a new CLI feature and not "the detector made
+mandatory" from above — it's the same trust model as the honest
+collaborators the "client-side hooks" note above already describes,
+just automated and continuously running instead of a human remembering to
+check. Concretely, it means:
+
+- It shrinks the exposure window from "for the rest of the run, forever"
+  (the original, undetected-locally chaos-sandbox finding) to "until the
+  operator's next round" — real, but bounded by that role's own polling
+  interval, not zero.
+- It does **not** retroactively fix history. A collaborator who commits
+  their own file during that window still leaks that one blob in that one
+  commit, permanently, exactly as before — reconciling `.gitattributes`
+  going forward is not the same action as rewriting history, and this loop
+  deliberately never attempts the second one on its own.
+- It is exactly as opt-out-able as the `pre-push` hook above, for the same
+  reason: it's *a* legitimate collaborator's own process, running with
+  *its own* push access, not a property of the repository or the server.
+  Nothing stops a real attacker with push access from targeting whichever
+  machine runs this process instead, or simply outracing it. It raises the
+  cost of T1 for an inattentive push, not the cost for a determined one.
+
 ## T3 and T4 — relocation and rollback
 
 The AAD ([04](04-envelope-format.md)) binds the envelope's own header, and the

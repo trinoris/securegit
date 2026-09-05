@@ -62,6 +62,20 @@ Alpine image, and the full bootstrap-through-verify sequence running
 together. See `chaos/README.md`'s Troubleshooting section for the
 specific things most likely to need a second pass.
 
+**Later correction: since verified end-to-end on real infrastructure.**
+The above is the original build-time note and is kept for its own record,
+but it's stale — GitHub Actions' `chaos` job (`.github/workflows/node.js.yml`)
+has since run this stack for real, more than once, on real Docker (not
+WSL), including a full `docker compose up --build` and a real verifier
+audit against a real fresh clone. The genuinely-unverified list above
+turned out fine except for one real bug (nonzero exit from `docker compose
+wait` aborting the "Extract" step under `bash -e`, losing that run's own
+evidence — fixed, not a sandbox-logic bug). The T1 finding these runs
+surfaced (plaintext leaking after chaos-5's attribute downgrade, nothing
+local catching it) matches this spec's own T1 discussion and
+[16](../securegit/16-adversarial-integrity.md)'s exactly — see that file's
+T1 section for the operator-side recovery now built in response.
+
 ## Core Principle
 
 > Same as [00](00-test-plan.md): fail towards a clear, recoverable error,
@@ -128,7 +142,7 @@ namespace (see "Sidecar vs. separate container" in Open Questions).
 |---|---|---|
 | actor-1 | Collaborator A | Clones, protects a file set, periodically edits+commits+pushes, periodically pulls, unlocks as needed. Ordinary daily use. |
 | actor-2 | Collaborator B | Same, with a file set overlapping actor-1's (real merge/conflict scenarios) and staggered timing, deliberately creating real push races beyond what F13/C5 construct with `Promise.all` in one process. |
-| actor-3 | Operator | Never edits files. Periodically runs `key rotate --confirm-recipients <n>`, `verify --access`, `securegit status`, `key add-recipient` for actor-1/actor-2's identities — the maintenance role, run concurrently with actors 1/2's ordinary traffic over real wall-clock time and a real network, not one `Promise.all` batch. |
+| actor-3 | Operator | Never edits `secrets/` files. Periodically runs `key rotate --confirm-recipients <n>`, `verify --access`, `securegit status`, `key add-recipient` for actor-1/actor-2's identities — the maintenance role, run concurrently with actors 1/2's ordinary traffic over real wall-clock time and a real network, not one `Promise.all` batch. Also re-runs `protect` against the full protected-pattern list every round — a no-op when `.gitattributes` already matches, and the T1 recovery when chaos-5's attribute downgrade has landed since the last round (`reconcileAttributes()` in `chaos/actors/driver.mjs`; see [16](../securegit/16-adversarial-integrity.md)'s T1 section for why this lives in the ops role rather than the product). |
 
 ## Chaos agents (fault/attack simulation)
 
