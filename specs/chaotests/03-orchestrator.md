@@ -91,16 +91,38 @@ fetch-every-branch fix hadn't landed yet — fourth run (33956353815)
 confirmed it resolved:** `pr-gated` reached `hardInvariantsHeld: true`
 outright, all three invariants clean.
 
-**Since then: commit signing (🔲 spec only, not yet implemented).** §"The
-orchestrator's review, precisely" point 5, and
+**Since then: commit signing (✅ both halves built).**
 [08-multi-recipient.md](../securegit/08-multi-recipient.md)'s "Commit
-signing", specify a further check — every commit reaching `master` must
-be signed by a fingerprint already on the recipient list — found to
-subsume the T3/T4 gap this document originally scoped out ("not built
-this pass, deliberately") once it became clear the identity question is
-simpler and more general than trying to detect each content shape
-individually. Not yet built; tracked the same way every other spec-only
-piece in this document is.
+signing" (`securegit identity init`'s detect-or-generate signing key,
+`key add-recipient --signing-key`, and `verify`'s
+`commit-signed-by-recipient` check on `HEAD`) and §"The orchestrator's
+review, precisely" point 5 (`driver.mjs`'s `allCommitsSignedByRecipient()`
+— every commit unique to the proposed ref, not just its tip, checked
+against `master`'s own recipient list before landing) are both
+implemented, found to subsume the T3/T4 gap this document originally
+scoped out ("not built this pass, deliberately") once it became clear the
+identity question is simpler and more general than trying to detect each
+content shape individually.
+
+Confirmed by direct local plumbing test (no Docker): a real recipient
+file with a registered SSH signing key, an unsigned commit (`%GF` empty,
+correctly rejected), a commit signed by that registered key (`%GF`
+matches `key list-recipients --json`'s `signingFingerprint`, correctly
+accepted), and a commit signed by an unregistered key (`%GF` present but
+absent from the registered set, correctly rejected) — the same three
+shapes point 5 exists to catch.
+
+**Honestly scoped, not yet exercised by a real chaos run:** the sandbox's
+own actors (`bootstrapAsCollaboratorA`/`bootstrapAsFollower`) share one
+keyring copied over `SHARED_DIR` rather than registering each other as
+recipients at all — so today, every real Docker chaos run has 0
+recipients, which is this check's own designed no-op tier
+(`commit-signed-by-recipient` and `allCommitsSignedByRecipient()` both
+treat 0-1 recipients as "nobody to impersonate," a silent pass, not a
+failure). The plumbing is real and locally confirmed; making a live chaos
+run actually exercise a rejection needs a separate, larger change —
+registering collaborator-a/collaborator-b as signing recipients at
+bootstrap and deliberately leaving chaos-5 unregistered — not done here.
 
 ## Core Principle
 
@@ -207,8 +229,9 @@ under W2) and `master`'s current tip as the base:
    *whether* the recipient they're legitimately adding should be trusted,
    which is still exactly the human question this point exists to force.
 5. **Commit signing — one general check, not a T3/T4-specific detector
-   (🔲 spec only, both halves — [08-multi-recipient.md](../securegit/08-multi-recipient.md)'s
-   "Commit signing" and this section).** Every commit unique to the
+   (✅ both halves — [08-multi-recipient.md](../securegit/08-multi-recipient.md)'s
+   "Commit signing" and this section — see the "Since then" note above for
+   what's built vs. what a real chaos run has actually exercised).** Every commit unique to the
    proposed ref (`git log origin/master..<sha>`) must be signed, and by a
    fingerprint already present in `master`'s own `.securegit/recipients/`
    — reject the whole merge otherwise. This was originally scoped as "not
@@ -466,9 +489,9 @@ Restated from [01](01-sandbox.md)'s own guardrails, extended for this spec:
 | W3: a clean collaborator feature branch is merged to `master` | `chaos/actors/driver.mjs`'s `reviewAndMaybeMerge()` | ✅ (local repro + real runs, e.g. 33956353815: `pr-gated` merged legitimate branches every run) |
 | W3: chaos-5's T1 (attribute downgrade) on a feature branch is rejected, `master`'s `.gitattributes` unchanged | same | ✅ (local repro + real runs) |
 | W3: chaos-5's T5 (hostile recipient) on a feature branch is always rejected/escalated, never merged | same (`recipientDiff` check) | ✅ (real runs: `pr-gated`'s `hostileRecipients` count was 0 in every run) |
-| W3: chaos-5's T3/T4 (relocation/rollback) on a feature branch is rejected via the commit-signing check (§5), not silently merged | `chaos/actors/driver.mjs`'s `reviewAndMaybeMerge()` | 🔲 **depends on commit signing, itself spec only** — until then, a relocation/rollback that doesn't also trip T1/T5 is *accepted*, same as any other clean merge. In practice this hasn't yet produced a real violation either, because a relocated/rolled-back blob is still *valid ciphertext under `pr-gated`'s per-role branch isolation* (see the corrected mechanism above) — but that's incidental, not a substitute for this check. |
-| Commit signing: an unsigned commit, or one signed by a non-recipient, is rejected by the orchestrator regardless of what it changes | `chaos/actors/driver.mjs`'s `reviewAndMaybeMerge()` | 🔲 spec only |
-| Commit signing: a legitimate collaborator's properly-signed commit is unaffected, accepted as before | `chaos/actors/driver.mjs`'s `reviewAndMaybeMerge()` | 🔲 spec only |
+| W3: chaos-5's T3/T4 (relocation/rollback) on a feature branch is rejected via the commit-signing check (§5), not silently merged | `chaos/actors/driver.mjs`'s `allCommitsSignedByRecipient()` | ✅ built (chaos-5 is never a recipient, so any commit it produces fails the check regardless of content) — **not yet exercised by a real chaos run**: the sandbox's actors share one keyring rather than registering each other as signing recipients, so every live run still has 0 recipients, the check's own no-op tier. Registering collaborator-a/b at bootstrap (chaos-5 deliberately excluded) is the follow-up that would make a real run actually exercise a rejection. |
+| Commit signing: an unsigned commit, or one signed by a non-recipient, is rejected by the orchestrator regardless of what it changes | `chaos/actors/driver.mjs`'s `allCommitsSignedByRecipient()` | ✅ built, confirmed by direct local plumbing test (real `ssh-keygen`/`git -S`/`%GF`, no Docker) — not yet exercised by a live chaos run, see the row above |
+| Commit signing: a legitimate collaborator's properly-signed commit is unaffected, accepted as before | `chaos/actors/driver.mjs`'s `allCommitsSignedByRecipient()` | ✅ built, confirmed by the same local plumbing test — not yet exercised by a live chaos run |
 | W3: chaos-5 pushing straight to `master` is refused by the `pre-receive` hook, never reaches the orchestrator | `remote/entrypoint.mjs`'s hook + `attacker.mjs`'s `attackDirectMasterBypass` | ✅ (local repro + real runs: every `direct-master-bypass` attempt logged `rejected: true`) |
 | W3: the merge-review step evaluates against `master`'s pre-merge state, not the branch's own edited `.gitattributes` (the same-push downgrade-plus-plaintext attack) | `chaos/actors/driver.mjs`'s `reviewAndMaybeMerge()` (always `checkout -B review origin/BRANCH` fresh) | ✅ (local repro) |
 | W2: `working` accumulates chaos-5's attacks like W1 — confirmed, and worse than originally predicted: a shared branch is *not* a quarantined staging area, since anyone with ordinary read access to the remote can already see it (see the corrected mechanism above) | full sandbox runs, `SANDBOX_WORKFLOW=working-branch` | ✅ real violations every run; promotion-to-`master` review itself also confirmed working (rejects resumed correctly once a hostile recipient landed on `working`) |
@@ -486,12 +509,17 @@ Restated from [01](01-sandbox.md)'s own guardrails, extended for this spec:
   *signing itself*, not about what to do with an uncertain verdict: how
   does a repository handle a legitimate collaborator who hasn't set up a
   signing key yet (see [08-multi-recipient.md](../securegit/08-multi-recipient.md)'s
-  "two cases this rule must not silently break")? For the sandbox
-  specifically, likely: every legitimate actor's container generates a
-  signing key at bootstrap and registers it (same shared-volume mechanism
-  the keyring already uses), so this doesn't need answering in the
-  abstract, only replicated in `chaos/actors/driver.mjs` once commit
-  signing is actually being implemented.
+  "two cases this rule must not silently break")? Answered for the general
+  case (the no-op tiers), still open for this sandbox specifically: the
+  check itself is built (`allCommitsSignedByRecipient()`), but
+  `bootstrapAsCollaboratorA`/`bootstrapAsFollower` still share one keyring
+  rather than registering each other as recipients at all, so a real
+  chaos run's recipient count is always 0 today — the check's own no-op
+  tier, not a gap in the check. The remaining work is exactly the wiring
+  this bullet originally anticipated: every legitimate actor's container
+  generates a signing key at bootstrap and registers itself as a
+  recipient (same shared-volume mechanism the keyring already uses),
+  chaos-5 deliberately excluded — not done here.
 - **One driver file or a new one — resolved: one file.** `chaos/actors/driver.mjs`
   already branched on `SANDBOX_ROLE`; the review logic turned out to
   reuse enough of `operatorRound()`'s surroundings (`pullOnce()`, `git()`,
@@ -535,6 +563,6 @@ Restated from [01](01-sandbox.md)'s own guardrails, extended for this spec:
   finally specifies precisely enough to build
 - [../securegit/08-multi-recipient.md](../securegit/08-multi-recipient.md) —
   "Commit signing," the identity keypair and recipient-file field this
-  spec's point 5 depends on, none of it built yet
+  spec's point 5 depends on — now built, both there and here
 - [../securegit/13-verify.md](../securegit/13-verify.md) — `verify`'s own,
   narrower (`HEAD`-only) half of the same signature check

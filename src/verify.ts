@@ -587,6 +587,14 @@ export interface AccessRecipient {
   addedCommit: string | null;
   /** Sorted ascending. Not necessarily contiguous — a recipient can predate a rotation, join after one, or both. */
   generations: number[];
+  /**
+   * The recipient's registered signing-key fingerprint (08-multi-recipient.md,
+   * "Commit signing"), or `null` if they haven't registered one, or it's
+   * malformed. Computed here so a consumer (a CI-side merge reviewer, for
+   * instance — 03-orchestrator.md's own per-branch-range signing check)
+   * never needs to reimplement OpenSSH fingerprint hashing itself.
+   */
+  signingFingerprint: string | null;
 }
 
 export interface AccessProvider {
@@ -651,6 +659,16 @@ export async function accessReport(opts: VerifyOptions): Promise<AccessReport> {
   for (const entry of entries) {
     const file = await readRecipientFile(recipientPath(opts.repoDir, entry.replace(/\.json$/, '')));
     const addedCommit = await firstAddedCommit(opts.repoDir, posix.join('.securegit', 'recipients', entry));
+    let signingFingerprint: string | null = null;
+    if (file.signingKey) {
+      try {
+        signingFingerprint = signingKeyFingerprint(file.signingKey);
+      } catch {
+        // A malformed signingKey in a committed file can't be resolved to a
+        // fingerprint — same as if the field were absent, not this report's
+        // error to raise.
+      }
+    }
     recipients.push({
       fingerprint: file.fingerprint,
       label: file.label,
@@ -658,6 +676,7 @@ export async function accessReport(opts: VerifyOptions): Promise<AccessReport> {
       addedBy: file.addedBy,
       addedCommit,
       generations: sortedGenerationKeys(file.keys),
+      signingFingerprint,
     });
   }
 

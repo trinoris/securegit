@@ -448,11 +448,16 @@ async function landReviewedMerge(newSha, expectedOld) {
  *     auto-accepted regardless of how plausible it looks)
  *   - `attributes-present` / `no-conflicting-attributes` failing, or any
  *     `leak` finding, rejects (T1, both the attack and the accident case)
- *   - anything else — including T3/T4's relocation/rollback shapes, which
- *     16-adversarial-integrity.md is explicit have no cryptographic
- *     detector — is accepted. A heuristic flag-not-block for those is a
- *     documented future refinement (03-orchestrator.md's Open Questions),
- *     not built here.
+ *   - once signing has been adopted (2+ recipients, at least one signing
+ *     key registered), any commit unique to the proposed ref that is
+ *     unsigned or signed by an unregistered key rejects too
+ *     (`allCommitsSignedByRecipient()` — point 5, subsuming T3/T4's
+ *     relocation/rollback shapes by identity rather than content: an
+ *     attacker never added as a recipient can't sign at all, regardless of
+ *     what the commit actually changes)
+ *   - anything else is accepted — 16-adversarial-integrity.md's own
+ *     ceiling still holds precisely: there is no cryptographic fix for the
+ *     *content* of a relocated/rolled-back blob, only for *who* committed it
  */
 async function reviewAndMaybeMerge(ref, sha, n) {
   await git(['fetch', 'origin', BRANCH], { cwd: WORK_DIR, env: gitEnv() });
@@ -499,6 +504,12 @@ async function reviewAndMaybeMerge(ref, sha, n) {
     return;
   }
 
+  const signing = await allCommitsSignedByRecipient(expectedOld, sha);
+  if (!signing.ok) {
+    await record('action', `rejected ${ref} (round ${n}): ${signing.reason}`, { ref, sha });
+    return;
+  }
+
   const mergeSha = (await git(['rev-parse', 'HEAD'], { cwd: WORK_DIR })).stdout.trim();
   const landed = await landReviewedMerge(mergeSha, expectedOld);
   if (landed.code !== 0) {
@@ -514,6 +525,65 @@ async function reviewAndMaybeMerge(ref, sha, n) {
     return;
   }
   await record('action', `merged ${ref} onto master (round ${n})`, { ref, sha, mergeSha });
+}
+
+/**
+ * Point 5 (03-orchestrator.md, "The orchestrator's review, precisely"):
+ * every commit unique to the proposed ref — `git log origin/master..<sha>`,
+ * computed here as `expectedOld..sha` directly against the incoming
+ * branch tip, never the merge commit — must be signed, and by a
+ * fingerprint already on `master`'s own recipient list. Rejects the whole
+ * merge otherwise: an attacker who was never added as a recipient can't
+ * produce a valid signature under any registered key, which is what makes
+ * this one check reject T1/T3/T4/T5 alike without needing to recognize
+ * the attack shape at all.
+ *
+ * Reads registered fingerprints via `securegit key list-recipients --json`
+ * against the already-checked-out merged worktree rather than
+ * reimplementing OpenSSH fingerprint hashing here — safe to read from the
+ * merge result specifically because the recipient-diff check earlier in
+ * `reviewAndMaybeMerge` already rejected any change under
+ * `.securegit/recipients/**`, so the merged tree's recipients are
+ * guaranteed identical to `origin/${BRANCH}`'s.
+ *
+ * Mirrors verify.ts's own `commit-signed-by-recipient` no-op tiers
+ * (13-verify.md, "Authenticity") on purpose: fewer than 2 recipients, or
+ * none with a signing key registered, means nobody has adopted signing
+ * yet, and enforcing against an empty allow-list would reject every merge
+ * forever — indistinguishable from a repository that simply hasn't turned
+ * this on. This is deliberately *not* delegated to the existing `verify
+ * --json` call already in `reviewAndMaybeMerge`: that check only ever
+ * resolves `HEAD`'s own signer (by design — 13-verify.md's own doc comment
+ * says a per-commit-range version is a merge reviewer's job, not verify's),
+ * so the full-range walk is new work that belongs here.
+ */
+async function allCommitsSignedByRecipient(base, tip) {
+  const listRes = await securegit(['key', 'list-recipients', '--json'], { cwd: WORK_DIR });
+  let recipients = [];
+  try {
+    recipients = JSON.parse(listRes.stdout);
+  } catch {
+    return { ok: false, reason: 'could not read recipient list' };
+  }
+  const registered = new Set(recipients.map((r) => r.signingFingerprint).filter((fp) => typeof fp === 'string'));
+  if (recipients.length < 2 || registered.size === 0) {
+    return { ok: true }; // not yet adopted — same no-op tiers as verify.ts's own check
+  }
+
+  const logRes = await git(['log', '--format=%H', `${base}..${tip}`], { cwd: WORK_DIR });
+  const commits = logRes.stdout.trim().split('\n').filter(Boolean);
+  for (const commit of commits) {
+    const fpRes = await git(
+      ['-c', 'gpg.ssh.allowedSignersFile=/dev/null', 'log', '-1', '--format=%GF', commit],
+      { cwd: WORK_DIR },
+    );
+    const fingerprint = fpRes.stdout.trim();
+    if (!fingerprint) return { ok: false, reason: `commit ${commit.slice(0, 8)} is not signed` };
+    if (!registered.has(fingerprint)) {
+      return { ok: false, reason: `commit ${commit.slice(0, 8)} is signed by an unrecognized key (${fingerprint})` };
+    }
+  }
+  return { ok: true };
 }
 
 // ref -> last sha reviewed (accepted or rejected) — skips re-reviewing

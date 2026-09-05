@@ -7,17 +7,16 @@ that it is still switched on. `securegit verify` is the command that answers
 "has a protected file ever been committed in plaintext, and is this repository
 still configured to prevent it".
 
-**Status: IMPLEMENTED, ONE CHECK SPEC-ONLY.** `src/verify.ts` implements the
-always-on configuration and index checks (L1–L3, L7–L10), the leak/advice
-content scan, `--access` (`accessReport()`), `--history` (`historyReport()`),
-and the single-recovery-path advisory (`recoveryPathStatus()`, also surfaced
-directly by `securegit status`) — all wired into `src/cli.ts` as
-`securegit verify [--access|--history] [--json]`. `--json` is built for all
-three forms: the report object itself, exactly as the module returns it,
-`JSON.stringify`'d to stdout. See "What this pass actually built" below.
-**Not yet built:** L11 / `commit-signed-by-recipient` — see "Authenticity"
-below and [08-multi-recipient.md](08-multi-recipient.md)'s "Commit signing"
-for the full design.
+**Status: IMPLEMENTED.** `src/verify.ts` implements the always-on
+configuration and index checks (L1–L3, L7–L10), L11 / `commit-signed-by-recipient`,
+the leak/advice content scan, `--access` (`accessReport()`), `--history`
+(`historyReport()`), and the single-recovery-path advisory
+(`recoveryPathStatus()`, also surfaced directly by `securegit status`) —
+all wired into `src/cli.ts` as `securegit verify [--access|--history] [--json]`.
+`--json` is built for all three forms: the report object itself, exactly
+as the module returns it, `JSON.stringify`'d to stdout. See "What this
+pass actually built" below and [08-multi-recipient.md](08-multi-recipient.md)'s
+"Commit signing" for `commit-signed-by-recipient`'s full design.
 
 ## Core Principle
 
@@ -40,7 +39,7 @@ for the full design.
 | L8 | `text` / `ident` / `working-tree-encoding` on a protected path | inherited `.gitattributes` | attribute check |
 | L9 | Keyring or session inside the worktree | `HOME` pointed at the repository | path check |
 | L10 | Only custodial providers remain | KMS added, passphrase removed | provider check |
-| L11 | `HEAD` unsigned, or signed by a non-recipient | attribution was never provable to begin with | authenticity check (🔲 spec only) |
+| L11 | `HEAD` unsigned, or signed by a non-recipient | attribution was never provable to begin with | authenticity check (✅ `commit-signed-by-recipient`) |
 
 L4 is the one that bites in practice. Nothing fails. The commit succeeds. The
 push succeeds. The file is in CodeCommit in plaintext and will stay there.
@@ -104,18 +103,22 @@ Four distinct findings come out of `verify`
 
 ### Authenticity — HEAD's own commit, once 2+ recipients exist
 
-**Status: SPEC ONLY — NOT IMPLEMENTED.** See
-[08-multi-recipient.md](08-multi-recipient.md)'s "Commit signing" section
-for the full design (the new `signingKey` field, `identity init`'s new
-detect-or-ask behaviour, and why every attribution claim before this was
-a self-reported string, not a proof). This subsection is `verify`'s own
-half of it.
+**Status: IMPLEMENTED.** See [08-multi-recipient.md](08-multi-recipient.md)'s
+"Commit signing" section for the full design (the `signingKey` field,
+`identity init`'s detect-or-ask behaviour, and why every attribution claim
+before this was a self-reported string, not a proof). This subsection is
+`verify`'s own half of it.
 
 ```
 $ securegit verify
   …
-  ✓  HEAD signed by a known recipient   ssh-ed25519 SHA256:… (7c1e4a09b2d5f836)
+  ✓  HEAD signed by a known recipient — signed by 7c1e4a09b2d5f836
 ```
+
+(or, once signing hasn't been adopted yet: `✓  HEAD signed by a known
+recipient — not yet enforced — no recipient has a signing key registered`;
+and on failure: `✗  HEAD signed by a known recipient — HEAD is not signed`
+or `… — HEAD is signed by an unrecognized key (SHA256:…)`.)
 
 A new check, `commit-signed-by-recipient`: is the *current* `HEAD`
 commit's signature (if any) valid, and does it belong to a fingerprint
@@ -450,11 +453,12 @@ Scope decisions made building it, and why:
 | `verify --access --json` writes the `AccessReport` shape to stdout | `src/cli.test.ts` | — | ✅ |
 | `verify --history --json` writes the `HistoryReport` shape to stdout, same exit code | `src/cli.test.ts` | — | ✅ |
 | `verify` runs without a key present | `src/verify.test.ts` | `repo-protected/` | ✅ |
-| `commit-signed-by-recipient` passes when `HEAD` is signed by a registered recipient's key | `src/verify.test.ts` | — | 🔲 spec only |
-| `commit-signed-by-recipient` fails when `HEAD` is unsigned, once 2+ recipients exist | `src/verify.test.ts` | — | 🔲 spec only |
-| `commit-signed-by-recipient` fails when `HEAD` is signed by a key not on the recipient list | `src/verify.test.ts` | — | 🔲 spec only |
-| `commit-signed-by-recipient` is `ok: true` unconditionally with 0 or 1 recipients | `src/verify.test.ts` | — | 🔲 spec only |
-| `commit-signed-by-recipient` never evaluates commits older than `HEAD` (no retroactive failure) | `src/verify.test.ts` | — | 🔲 spec only |
+| `commit-signed-by-recipient` passes when `HEAD` is signed by a registered recipient's key | `src/verify.test.ts` | — | ✅ |
+| `commit-signed-by-recipient` fails when `HEAD` is unsigned, once 2+ recipients exist | `src/verify.test.ts` | — | ✅ |
+| `commit-signed-by-recipient` fails when `HEAD` is signed by a key not on the recipient list | `src/verify.test.ts` | — | ✅ |
+| `commit-signed-by-recipient` is `ok: true` unconditionally with 0 or 1 recipients, and with 2+ recipients if none has a signing key registered | `src/verify.test.ts` | — | ✅ |
+| `commit-signed-by-recipient` never evaluates commits older than `HEAD` (no retroactive failure) | `src/verify.test.ts` | — | ✅ |
+| `commit-signed-by-recipient`'s fingerprint comparison is constant-time, not a raw `===` | `src/package.test.ts` (repo-wide static check) | — | ✅ |
 
 ## Relationship to Other Specs
 

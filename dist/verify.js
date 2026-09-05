@@ -520,6 +520,17 @@ export async function accessReport(opts) {
     for (const entry of entries) {
         const file = await readRecipientFile(recipientPath(opts.repoDir, entry.replace(/\.json$/, '')));
         const addedCommit = await firstAddedCommit(opts.repoDir, posix.join('.securegit', 'recipients', entry));
+        let signingFingerprint = null;
+        if (file.signingKey) {
+            try {
+                signingFingerprint = signingKeyFingerprint(file.signingKey);
+            }
+            catch {
+                // A malformed signingKey in a committed file can't be resolved to a
+                // fingerprint — same as if the field were absent, not this report's
+                // error to raise.
+            }
+        }
         recipients.push({
             fingerprint: file.fingerprint,
             label: file.label,
@@ -527,6 +538,7 @@ export async function accessReport(opts) {
             addedBy: file.addedBy,
             addedCommit,
             generations: sortedGenerationKeys(file.keys),
+            signingFingerprint,
         });
     }
     const providers = [];

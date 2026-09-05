@@ -25,7 +25,7 @@ import {
   EXIT_VERIFY_LEAK,
   type VerifyReport,
 } from './verify.js';
-import { generateX25519KeyPair, identityFingerprint } from './identity.js';
+import { generateX25519KeyPair, identityFingerprint, signingKeyFingerprint } from './identity.js';
 import {
   wrapAllGenerations,
   writeRecipientFile,
@@ -442,6 +442,26 @@ describe('commit-signed-by-recipient (specs/securegit/13-verify.md, "Authenticit
     expect(checkFor(report)?.ok).toBe(true);
   });
 
+  it('never evaluates history predating adoption — earlier unsigned commits do not fail the check once HEAD is signed', async () => {
+    await setUpProtectedRepo();
+    // Two ordinary unsigned commits, exactly what "adopting signing later"
+    // looks like on a repository with real history already behind it —
+    // this check only ever resolves HEAD ([13](13-verify.md)'s own scope,
+    // matching L6's precedent of never retroactively judging history).
+    await writeFile(join(dir, 'unsigned-a.txt'), 'a');
+    await execFile('git', ['add', 'unsigned-a.txt'], { cwd: dir });
+    await execFile('git', ['commit', '--quiet', '-m', 'unsigned commit 1'], { cwd: dir });
+    await writeFile(join(dir, 'unsigned-b.txt'), 'b');
+    await execFile('git', ['add', 'unsigned-b.txt'], { cwd: dir });
+    await execFile('git', ['commit', '--quiet', '-m', 'unsigned commit 2'], { cwd: dir });
+
+    const publicKey = await signHeadWith(join(home, 'signer'));
+    await writeRecipientFile(recipientPath(dir, 'aaaa'), minimalRecipient('aaaa', publicKey));
+    await writeRecipientFile(recipientPath(dir, 'bbbb'), minimalRecipient('bbbb'));
+    const report = await verify({ repoDir: dir, home, providers: [] });
+    expect(checkFor(report)?.ok).toBe(true);
+  });
+
   it('fails when HEAD is signed, but by a key not on the recipient list — the real attacker shape', async () => {
     await setUpProtectedRepo();
     await signHeadWith(join(home, 'attacker-key'));
@@ -655,8 +675,33 @@ describe('accessReport()', () => {
         addedBy: 'b30f92ac',
         addedCommit: null,
         generations: [1],
+        signingFingerprint: null,
       },
     ]);
+  });
+
+  it('computes signingFingerprint for a recipient with a signingKey, and leaves it null for one without (specs/securegit/08-multi-recipient.md, "Commit signing")', async () => {
+    const { repoId, rmk, keyId } = await setUpProtectedRepo();
+    const recipientKeyPair = generateX25519KeyPair();
+    const fingerprint = identityFingerprint(recipientKeyPair.publicKey);
+    const wrapped = wrapAllGenerations(singleKeySource(keyId, rmk), [keyId], recipientKeyPair.publicKey, repoId);
+    await execFile('ssh-keygen', ['-t', 'ed25519', '-f', join(home, 'signer'), '-N', '', '-C', 'x']);
+    const signingKey = (await readFile(join(home, 'signer.pub'), 'utf8')).trim();
+
+    await writeRecipientFile(recipientPath(dir, fingerprint), {
+      version: 1,
+      fingerprint,
+      publicKey: 'SGPUB1-does-not-need-to-decode-for-this-test',
+      label: 'laptop',
+      addedAt: '2026-01-14T00:00:00.000Z',
+      addedBy: 'b30f92ac',
+      signingKey,
+      keys: wrapped,
+    });
+
+    const report = await accessReport({ repoDir: dir, home });
+    expect(report.recipients[0]?.signingFingerprint).toBe(signingKeyFingerprint(signingKey));
+    expect(report.recipients[0]?.signingFingerprint).toMatch(/^SHA256:/);
   });
 
   it('names the oldest commit that added the recipient file, once committed', async () => {

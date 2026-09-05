@@ -216,12 +216,16 @@ commit signing (below) is in place; self-reported until then.
 
 ## Commit signing — closing the attribution gap
 
-**Status: SPEC ONLY — NOT IMPLEMENTED.** Every attribution claim described
-above and in [13](13-verify.md) — `addedBy`, `git blame`, `git log`'s author
-field — is, today, a plain string written by whoever ran the command, from
-local state they fully control. Nothing proves it. This section specifies
-the fix; it is not built yet (`src/identity.ts` has no signing keypair,
-`src/verify.ts` has no signature check).
+**Status: IMPLEMENTED.** Every attribution claim described above and in
+[13](13-verify.md) — `addedBy`, `git blame`, `git log`'s author field — was,
+before this section was built, a plain string written by whoever ran the
+command, from local state they fully control. Nothing proved it. This
+section specifies the fix, and it is now built: `src/identity.ts`'s
+detect-or-generate signing keypair, `src/recipients.ts`'s optional
+`signingKey` field, `src/cli.ts`'s `identity init`/`key add-recipient`
+wiring, and `src/verify.ts`'s `commit-signed-by-recipient` check (see
+"What this pass actually built" below for exactly what that check does and
+doesn't cover).
 
 ### Why this is a separate keypair, not the existing one
 
@@ -510,6 +514,74 @@ add-recipient`/`remove-recipient`, and a second path inside `unlock`.
   this is not specific to multi-recipient joining, it would bite anyone who
   attaches the filter before their first pull for any reason.
 
+### Commit signing
+
+`src/identity.ts` gained `signingKeyPath`, `gitConfigGet` (reads git config
+scoped to an explicit `home`, not the running process's real `$HOME`),
+`detectLocalSigningKey`, `generateSigningKeyPair`, and
+`signingKeyFingerprint`. `src/recipients.ts`'s `RecipientFile` gained the
+optional `signingKey` field this section specifies. `src/cli.ts` wires
+`identity init`'s detect-or-generate flow (`--generate-signing-key`,
+detection always wins over the flag) and `key add-recipient
+--signing-key`. `src/verify.ts` gained the `commit-signed-by-recipient`
+check.
+
+- **Three real bugs found via TDD, each caught by a failing test before
+  being trusted, not by inspection.**
+  1. `generateSigningKeyPair` originally used `execFile('ssh-keygen', ...)`,
+     which never closes a child's stdin — `ssh-keygen`'s interactive
+     "Overwrite (y/n)?" prompt (when a key already exists at the target
+     path) then hangs forever rather than failing. Fixed by switching to
+     `spawn` with `stdio: ['ignore', 'pipe', 'pipe']`, which maps stdin to
+     a real EOF.
+  2. `signingKeyFingerprint`'s base64 validation trusted
+     `Buffer.from(field, 'base64')` to throw on malformed input — it
+     doesn't; Node decodes leniently and silently drops invalid characters
+     instead of erroring. Fixed with an explicit `/^[A-Za-z0-9+/]+=*$/`
+     regex check before decoding.
+  3. `gitConfigGet` read `process.env` unmodified, so `detectLocalSigningKey`
+     would silently read the real developer machine's global git config
+     instead of an explicitly-injected `home` (test isolation, or any
+     legitimately-different-home caller). Fixed by threading `home` through
+     to an explicit `env: { ...process.env, HOME: home }`.
+- **`verify.ts`'s `commit-signed-by-recipient` resolves `HEAD`'s signer via
+  `git -c gpg.ssh.allowedSignersFile=/dev/null log -1 --format=%GF HEAD`.**
+  Confirmed empirically before writing this: git refuses to attempt SSH
+  signature parsing *at all* without `gpg.ssh.allowedSignersFile` pointing
+  at an existing file, even an empty one — but `%GF` (the signer's real
+  fingerprint) resolves correctly from the commit's own embedded signature
+  regardless of whether that key is actually listed in the file (only
+  `%G?`, which this check never reads, changes from `G` to `U`). `/dev/null`
+  unlocks parsing; the recipient-list comparison against `%GF` *is* the
+  trust decision, not the allowed-signers file.
+- **Two no-op tiers, not one, keep this from ever punishing an
+  unadopted repository:** 0–1 recipients (no one else to impersonate) and
+  2+ recipients with zero registered signing keys (nobody has adopted
+  signing yet — enforcing against an empty allow-list would fail every
+  commit forever, indistinguishable from "hasn't turned this on").
+- **Only ever resolves `HEAD`, deliberately — proven, not just claimed, by
+  a regression test that commits twice unsigned, then signs only the
+  amended tip and asserts the check still passes.** A broader
+  per-commit-range check (every commit unique to a *proposed* ref, not a
+  single already-landed `HEAD`) is a merge reviewer's job, not this one's —
+  built separately in the chaos sandbox's orchestrator
+  (`chaos/actors/driver.mjs`'s `allCommitsSignedByRecipient()`, see
+  [03-orchestrator.md](../chaotests/03-orchestrator.md) point 5) rather than
+  here, since a real self-hosted deployment or CI-side required check plays
+  that role, not `securegit verify` itself.
+- **The fingerprint comparison must be constant-time, caught by this
+  project's own existing hygiene test, not written correctly the first
+  time.** The initial `commitSignedByRecipientCheck` compared fingerprints
+  with a raw `===`, which `src/package.test.ts`'s
+  `no production file compares a fingerprint with a raw === or !==` test
+  exists specifically to forbid — fixed with `crypto.ts`'s `equalCt`,
+  the same pattern `keyring.ts` already uses for its own fingerprint check.
+- **`accessReport()`'s `AccessRecipient` gained a computed
+  `signingFingerprint: string | null`** (`null` when absent or malformed),
+  so a consumer — `key list-recipients --json`, and the chaos orchestrator
+  above — gets a recipient's registered fingerprint without reimplementing
+  OpenSSH fingerprint hashing itself.
+
 ## Test Cases
 
 | Test | Test File | Fixture | Status |
@@ -540,12 +612,15 @@ add-recipient`/`remove-recipient`, and a second path inside `unlock`.
 | Removed recipient cannot read post-rotation blobs | `src/git.integration.test.ts` | `identities/` | ✅ |
 | Recipient files are never filtered | `src/install.test.ts` | — | ✅ |
 | Removing the last recipient is refused | `src/recipients.test.ts` | — | N/A — deliberately not built; see "What this pass actually built" above for why a hard refusal was reconsidered and rejected, not just deferred |
-| `identity init` detects an existing local `user.signingkey` and records it, no prompt | `src/identity.test.ts` | — | 🔲 spec only, see "Commit signing" |
-| `identity init` does not silently generate a signing key when none is found | `src/cli.test.ts` | — | 🔲 spec only |
-| `identity init --generate-signing-key` creates one only when none is already recorded | `src/identity.test.ts` | — | 🔲 spec only |
-| `key add-recipient --signing-key` records the recipient's signing public key | `src/recipients.test.ts` | — | 🔲 spec only |
-| `verify` reports an unsigned/wrong-signer commit only once 2+ recipients exist; a no-op at 0–1 | `src/verify.test.ts` | — | 🔲 spec only |
-| `verify`'s signing check never evaluates history predating adoption (base form, not `--history`) | `src/verify.test.ts` | — | 🔲 spec only |
+| `identity init` detects an existing local `user.signingkey` and records it, no prompt | `src/identity.test.ts`, `src/cli.test.ts` | — | ✅ |
+| `identity init` does not silently generate a signing key when none is found | `src/cli.test.ts` | — | ✅ |
+| `identity init --generate-signing-key` creates one only when none is already recorded | `src/cli.test.ts` | — | ✅ |
+| `key add-recipient --signing-key` records the recipient's signing public key | `src/cli.test.ts`, `src/recipients.test.ts` | — | ✅ |
+| `verify` reports an unsigned/wrong-signer commit only once 2+ recipients exist; a no-op at 0–1 | `src/verify.test.ts` | — | ✅ |
+| `verify`'s signing check never evaluates history predating adoption (base form, not `--history`) | `src/verify.test.ts` | — | ✅ |
+| Fingerprint comparison in the signing check is constant-time, not a raw `===` | `src/package.test.ts` (repo-wide static check), `src/verify.test.ts` | — | ✅ |
+| `accessReport()` computes a recipient's `signingFingerprint`, `null` when absent or malformed | `src/verify.test.ts` | — | ✅ |
+| Orchestrator: every commit unique to a proposed ref must be signed by a recipient, checked against the base tip's own recipient list, not the merge result's | `chaos/actors/driver.mjs` | — | ✅ built, confirmed by direct local plumbing test (no Docker chaos run yet exercises a real rejection — see [03-orchestrator.md](../chaotests/03-orchestrator.md)'s own honest scoping note) |
 
 ## Relationship to Other Specs
 

@@ -32,9 +32,9 @@ the real protocol.
 |---|---|---|---|---|
 | T1 | Attribute downgrade | push access | next commit of a path lands in plaintext | `verify` ([13](13-verify.md)) — **v1** |
 | T2 | Local filter substitution | local account access | `clean` becomes `cat` | nothing; local access is game over |
-| T3 | Blob relocation | push access | ciphertext moved to a path where its plaintext is dangerous | `bindPath`; commit signing against a recipient list closes it structurally where a merge reviewer runs it — 🔲 spec only |
-| T4 | Blob rollback | push access | a path silently reverts to an older secret | branch protection; commit signing against a recipient list, same as T3 — 🔲 spec only |
-| T5 | Hostile recipient | push access + a merged commit | attacker receives every future generation | `verify --access`, review — **v1**; commit signing against a recipient list rejects it at the source — 🔲 spec only |
+| T3 | Blob relocation | push access | ciphertext moved to a path where its plaintext is dangerous | `bindPath`; commit signing against a recipient list closes it structurally where a merge reviewer runs it — ✅ built (`verify`'s `HEAD`-only check, and the chaos orchestrator's per-branch-range check) |
+| T4 | Blob rollback | push access | a path silently reverts to an older secret | branch protection; commit signing against a recipient list, same as T3 — ✅ built |
+| T5 | Hostile recipient | push access + a merged commit | attacker receives every future generation | `verify --access`, review — **v1**; commit signing against a recipient list rejects it at the source — ✅ built |
 | T6 | Recovery theft | both halves of an export | full, permanent, invisible read access | split storage, export log — **v1** |
 | T7 | Session theft | code execution as the user | the master key | `0600`, tmpfs, TTL — **v1** |
 | T8 | Offline passphrase attack | the keyring file | the master key | scrypt cost, length floor — **v1** |
@@ -203,7 +203,7 @@ and protected branches. `securegit` states the limit rather than implying the
 authentication tag covers more than it does — a per-blob GCM tag proves *this
 ciphertext was produced by a key holder*, not *this ciphertext belongs here*.
 
-**Narrowed further by commit signing (🔲 spec only — [08-multi-recipient.md](08-multi-recipient.md)'s
+**Narrowed further by commit signing (✅ built — [08-multi-recipient.md](08-multi-recipient.md)'s
 "Commit signing"), where a merge reviewer actually runs it.** T3/T4 never
 had a *content* signature to check — the relocated/rolled-back blob is
 genuinely valid ciphertext, produced by a real key holder, just sitting
@@ -235,8 +235,8 @@ attacker nothing until the next `key rotate` wraps the new generation for them.
 - `addedBy` records the identity that performed the addition — a
   self-reported string, not a proof, until commit signing (next
   paragraph) exists to check it against.
-- **Commit signing (🔲 spec only) would reject the addition outright,
-  before merge, rather than only making it reviewable after.** An
+- **Commit signing (✅ built) rejects the addition outright, before
+  merge, rather than only making it reviewable after.** An
   attacker adding `attacker.json` was, by definition, never a recipient
   before this commit — so if a reviewer requires every commit to be
   signed by a fingerprint *already* on the recipient list, this commit
@@ -390,7 +390,7 @@ requests ([11](11-filter-process.md)).
 | T3: relocated blob decrypts under `bindPath = false`, as documented | `src/envelope.test.ts` | — | ✅ |
 | T5: `verify --access` names the commit that added each recipient | `src/verify.test.ts` | — | ✅ |
 | T5: `rotate` requires confirmation of the recipient count | `src/cli.test.ts` | — | ✅ |
-| T3/T4/T5: a commit signed by a fingerprint not on the recipient list is rejected by a merge review, regardless of attack shape | [chaos sandbox orchestrator](../chaotests/03-orchestrator.md) | — | 🔲 spec only |
+| T3/T4/T5: a commit signed by a fingerprint not on the recipient list is rejected by a merge review, regardless of attack shape | [chaos sandbox orchestrator](../chaotests/03-orchestrator.md) | — | ✅ built, confirmed by direct local plumbing test — not yet exercised by a live chaos run (see that spec's own honest scoping note) |
 | T6: the recovery file alone does not decrypt without the code | `src/recovery.test.ts` | — | ✅ |
 | T6: an export appends to the committed recovery log, not the code or file | `src/recovery.test.ts` | — | ✅ |
 | T7: session file with loose permissions is deleted, not used | `src/session.test.ts` | — | ✅ |

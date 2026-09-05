@@ -78,6 +78,14 @@ export interface AccessRecipient {
     addedCommit: string | null;
     /** Sorted ascending. Not necessarily contiguous — a recipient can predate a rotation, join after one, or both. */
     generations: number[];
+    /**
+     * The recipient's registered signing-key fingerprint (08-multi-recipient.md,
+     * "Commit signing"), or `null` if they haven't registered one, or it's
+     * malformed. Computed here so a consumer (a CI-side merge reviewer, for
+     * instance — 03-orchestrator.md's own per-branch-range signing check)
+     * never needs to reimplement OpenSSH fingerprint hashing itself.
+     */
+    signingFingerprint: string | null;
 }
 export interface AccessProvider {
     id: string;
