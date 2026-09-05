@@ -159,8 +159,19 @@ jobs:
             mkdir -p "site/$workflow"
             src="downloaded/chaos-result-$workflow-${{ github.run_id }}"
             if [ -d "$src" ]; then
-              cp "$src"/report.jsonl "site/$workflow/report.jsonl" 2>/dev/null || true
-              cp "$src"/verifier-result.json "site/$workflow/verifier-result.json" 2>/dev/null || true
+              # The uploading step (matrix leg's "Upload this workflow's raw
+              # run artifacts") lists `site/report.jsonl` and
+              # `site/verifier-result.json` alongside a *sibling*
+              # `verifier.log` (not under `site/`) — upload-artifact takes
+              # the common ancestor of all listed paths as the archive
+              # root, which is the workspace root here (verifier.log isn't
+              # under site/), so the downloaded artifact keeps the `site/`
+              # prefix rather than flattening it away. Confirmed by a real
+              # run (33955584166) where this cp silently found nothing
+              # (redirected to /dev/null) and every mode's page loaded an
+              # empty comparison.
+              cp "$src"/site/report.jsonl "site/$workflow/report.jsonl" 2>/dev/null || true
+              cp "$src"/site/verifier-result.json "site/$workflow/verifier-result.json" 2>/dev/null || true
             else
               echo "::warning::no results downloaded for workflow=$workflow (that matrix leg likely never completed the 'Run the chaos sandbox' step)"
             fi
