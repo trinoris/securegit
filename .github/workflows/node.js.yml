@@ -136,7 +136,14 @@ jobs:
   # exists to surface, never a reason to skip publishing it.
   chaos-publish:
     needs: chaos
-    if: always() && needs.chaos.result != 'cancelled'
+    # `chaos` itself only runs on schedule/workflow_dispatch (see its own
+    # `if:` above) — every ordinary push/PR run has `chaos.result ==
+    # 'skipped'`, and `always()` alone doesn't exclude that. Confirmed by
+    # a real run (33957549388, triggered by an ordinary push): without
+    # this, chaos-publish ran anyway with zero downloaded artifacts,
+    # assembled a site with three empty mode subfolders, and deploy-pages
+    # published *that*, silently wiping out the last real comparison.
+    if: always() && needs.chaos.result != 'skipped' && needs.chaos.result != 'cancelled'
     runs-on: ubuntu-latest
     permissions:
       contents: read
