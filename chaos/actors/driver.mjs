@@ -257,7 +257,27 @@ async function reconcileAttributes(n) {
 
 async function operatorRound(n) {
   await securegit(['unlock'], { cwd: WORK_DIR });
-  await pullOnce();
+  const pull = await pullOnce();
+  // Unlike `collaboratorRound` (which treats a failed pull as an ordinary
+  // push race and retries around its own push), this is worth recording
+  // every round, pass or fail: `reconcileAttributes()` below can only ever
+  // see what this pull actually brought in, so a merge that silently keeps
+  // failing round after round would silently stop the T1 recovery loop
+  // too, with nothing else in this round's own logic able to tell. `head`
+  // makes a stuck/diverged local HEAD visible directly, not just inferred
+  // from `pull.ok`.
+  const headRes = await git(['rev-parse', 'HEAD'], { cwd: WORK_DIR });
+  await record('observation', `pull (round ${n})`, { ...pull, head: headRes.stdout.trim() });
+  if (!pull.ok) {
+    const [originRes, statusRes] = await Promise.all([
+      git(['rev-parse', `origin/${BRANCH}`], { cwd: WORK_DIR }),
+      git(['status', '--porcelain'], { cwd: WORK_DIR }),
+    ]);
+    await record('observation', `pull failed (round ${n})`, {
+      origin: originRes.stdout.trim(),
+      dirty: statusRes.stdout.trim(),
+    });
+  }
 
   await reconcileAttributes(n);
 
