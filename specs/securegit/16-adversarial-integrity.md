@@ -113,15 +113,34 @@ it mandatory.
 **Demonstrated: an always-on operator process closes the loop, bounded.**
 The chaos sandbox's `operator` role (`chaos/actors/driver.mjs`,
 [chaotests/01-sandbox.md](../chaotests/01-sandbox.md)) now re-runs `protect`
-against the full protected-pattern list every round —
-`reconcileAttributes()`, built entirely from the existing `protect`
-primitive (idempotent: a no-op when `.gitattributes` already matches),
-committing and pushing the restored line the round after chaos-5's
-downgrade lands. This is not a new CLI feature and not "the detector made
-mandatory" from above — it's the same trust model as the honest
-collaborators the "client-side hooks" note above already describes,
-just automated and continuously running instead of a human remembering to
-check. Concretely, it means:
+against the full protected-pattern list every round, immediately followed
+by `reencrypt` — `reconcileAttributes()`, built entirely from these two
+existing primitives (both idempotent: a no-op pair when `.gitattributes`
+already matches and nothing protected is currently sitting as plaintext),
+committing and pushing the fix the round after chaos-5's downgrade lands.
+This is not a new CLI feature and not "the detector made mandatory" from
+above — it's the same trust model as the honest collaborators the
+"client-side hooks" note above already describes, just automated and
+continuously running instead of a human remembering to check.
+
+**`reencrypt` is not optional here — found the hard way, by a real run.**
+The first version of this recovery restored `.gitattributes` alone. Real
+run 33952769755 showed that wedges the operator permanently: the moment
+the attribute comes back, git starts running `clean` again over the
+affected path's *working-tree* content (still plaintext — that's exactly
+what the downgrade let land) to compare against the index — and the index
+holds that *same* plaintext, since that's what got committed while
+unprotected. `clean`'s freshly-produced ciphertext no longer matches the
+index, git now considers the path locally modified, and every subsequent
+`pull` touching it fails with "local changes would be overwritten by
+merge" — forever, since nothing ever commits a fix for that specific
+mismatch on its own. Confirmed both ways with a local, no-Docker repro
+(plain `git` + the built CLI, same shape as [15](15-failure-modes.md)'s F16
+investigation): restoring the attribute alone reproduces the wedge
+immediately on the next pull; adding `reencrypt` before the commit — which
+re-runs `clean` over the working tree and stages the result, matching the
+index to what git now expects — resolves it, confirmed by a clean
+fast-forward merge afterward. Concretely, the fix as built means:
 
 - It shrinks the exposure window from "for the rest of the run, forever"
   (the original, undetected-locally chaos-sandbox finding) to "until the
@@ -131,7 +150,12 @@ check. Concretely, it means:
   their own file during that window still leaks that one blob in that one
   commit, permanently, exactly as before — reconciling `.gitattributes`
   going forward is not the same action as rewriting history, and this loop
-  deliberately never attempts the second one on its own.
+  deliberately never attempts the second one on its own. `reencrypt`'s own
+  restore commit *does* re-encrypt whatever's currently checked out as
+  plaintext at that moment (that's the wedge fix above) — a real, small
+  side benefit on top of the wedge fix, but only for the one commit made
+  at reconciliation time, not for any earlier leaked commit still sitting
+  in history.
 - It is exactly as opt-out-able as the `pre-push` hook above, for the same
   reason: it's *a* legitimate collaborator's own process, running with
   *its own* push access, not a property of the repository or the server.

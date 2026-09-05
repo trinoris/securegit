@@ -226,6 +226,24 @@ async function collaboratorRound(n) {
  * history is a deliberate, disruptive incident-response action this loop
  * must never take on its own) — this only bounds how long the *next*
  * write stays exposed for.
+ *
+ * **Found by a real run (33952769755), not anticipated up front:**
+ * restoring the attribute alone wedges every future round. The instant
+ * `secrets/**`'s `filter=securegit` line comes back, git starts running
+ * `clean` again over `secrets/collaborator-a.json`'s *working-tree*
+ * content (still plaintext — that plaintext is exactly what the downgrade
+ * let land) to compare against the index — and the index still holds that
+ * *same* plaintext (that's what got committed while unprotected), so
+ * `clean`'s freshly-produced ciphertext no longer matches it. Git now
+ * considers the path locally modified, and refuses every subsequent
+ * `pullOnce()` merge that touches it ("Your local changes... would be
+ * overwritten by merge") — forever, since nothing here ever commits a fix
+ * for that mismatch on its own. `reencrypt` is exactly the existing
+ * primitive for this: re-run `clean` over every protected path's
+ * working-tree plaintext and stage the ciphertext result, matching the
+ * index to what git now expects. Staged via `update-index` plumbing, so
+ * it needs no separate `git add` — the same `git commit` below picks up
+ * both this and `.gitattributes` together.
  */
 async function reconcileAttributes(n) {
   const before = await readFile(GITATTRIBUTES_PATH, 'utf8').catch(() => '');
@@ -233,6 +251,7 @@ async function reconcileAttributes(n) {
   const after = await readFile(GITATTRIBUTES_PATH, 'utf8').catch(() => '');
   if (after === before) return; // already matched — the ordinary case, not worth logging every round
 
+  const reencrypt = await securegit(['reencrypt'], { cwd: WORK_DIR });
   await git(['add', '.gitattributes'], { cwd: WORK_DIR, env: gitEnv() });
   const commit = await git(
     ['commit', '-m', 'operator: restore securegit attribute protection'],
@@ -252,7 +271,12 @@ async function reconcileAttributes(n) {
       push = await git(['push', 'origin', BRANCH], { cwd: WORK_DIR, env: gitEnv() });
     }
   }
-  await record('action', `restored .gitattributes protection (round ${n})`, { before, after, push });
+  await record('action', `restored .gitattributes protection (round ${n})`, {
+    before,
+    after,
+    reencrypt: { code: reencrypt.code, stderr: reencrypt.stderr.trim() },
+    push,
+  });
 }
 
 async function operatorRound(n) {
