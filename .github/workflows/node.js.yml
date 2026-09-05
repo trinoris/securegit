@@ -116,7 +116,18 @@ jobs:
       # — see the job comment for why this can never affect a push/PR
       # run's status, and specs/chaotests/03-orchestrator.md's "Predicted
       # plaintext-leak shape" table for which legs are expected to fail.
-      - name: Fail if a hard invariant was violated
+      # Job status here is "did the sandbox produce a trustworthy result",
+      # not "did an invariant hold" — those are the same question only
+      # for `pr-gated`, the one workflow with a review gate at all.
+      # direct-master/working-branch violating an invariant is the
+      # expected, unsurprising result of having no gate (specs/chaotests/
+      # 03-orchestrator.md's whole comparison exists to show exactly
+      # that) — real data for the viewer to display, not a build failure
+      # to page anyone over. `pr-gated` failing this check is the one
+      # genuinely alarming case: it's the mode this project claims should
+      # never violate an invariant, so a violation there is a real
+      # regression in the review logic, and stays a hard job failure.
+      - name: Check whether a hard invariant was violated
         if: always()
         run: |
           if [ ! -s site/verifier-result.json ]; then
@@ -126,8 +137,11 @@ jobs:
           held=$(jq -r '.hardInvariantsHeld' site/verifier-result.json)
           echo "hardInvariantsHeld=$held"
           if [ "$held" != "true" ]; then
-            echo "::error::A hard invariant was violated this run (workflow=${{ matrix.workflow }}) — see the deployed viewer or verifier.log."
-            exit 1
+            if [ "${{ matrix.workflow }}" = "pr-gated" ]; then
+              echo "::error::A hard invariant was violated under pr-gated — this is the one workflow expected to always hold; see the deployed viewer or verifier.log for what actually happened."
+              exit 1
+            fi
+            echo "::warning::A hard invariant was violated under ${{ matrix.workflow }} — expected for a workflow with no review gate; see the deployed viewer for the actual result, this job's status intentionally doesn't reflect it."
           fi
 
   # Assembles all three matrix legs' results into one site and publishes
