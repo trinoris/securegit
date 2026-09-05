@@ -41,10 +41,27 @@ merge-review mechanism itself (clean merge → accepted via `update-ref`;
 T1-downgraded merge → rejected, master untouched; direct push to master →
 refused by the pre-receive hook) is confirmed with a local, no-Docker repro
 using plain `git` plumbing and the built CLI, same discipline as
-[16](../securegit/16-adversarial-integrity.md)'s T1 recovery fix — what
-that repro can't confirm is the real Docker/compose wiring (volume
-mounts, env var propagation, the matrix/publish job graph itself), which
-needs an actual GitHub Actions run.
+[16](../securegit/16-adversarial-integrity.md)'s T1 recovery fix.
+
+**First real run (33955186271) found a real bug the repro's own fetch
+step had silently papered over.** `orchestratorReviewRound()`'s first cut
+learned a candidate branch's sha via `git ls-remote` alone — which never
+transfers the commit *object*, only the ref pointer — so every real merge
+attempt after a branch's first (still-at-bootstrap) review failed with
+git's own "not something we can merge" (an unknown-object error, easily
+misread as an ordinary merge conflict, since both land in the same
+`merge.code !== 0` branch). Net effect: `pr-gated` and `working-branch`
+both showed `zeroDataLoss: false` (every collaborator commit "missing"
+from the operator's own `git log --all`, because their branches were
+never actually fetched) even though `noPlaintextLeaked` still correctly
+came back `true` for `pr-gated` — master simply never advanced past its
+initial clean state, which trivially has nothing to leak. The local repro
+never caught this because it always fetched the branch by name before
+merging by hand; the real driver code didn't do the same until this was
+found. Fixed by having `orchestratorReviewRound()` `git fetch origin
+<ref>` (not `ls-remote`) before ever attempting the merge — see the git
+history for the exact commit. A second real run is what actually confirms
+the fix and the headline comparison; not yet run as of this note.
 
 ## Core Principle
 

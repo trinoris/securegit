@@ -522,8 +522,18 @@ const lastReviewedSha = new Map();
 
 async function orchestratorReviewRound(n) {
   for (const ref of await candidateRefs()) {
-    const shaRes = await git(['ls-remote', 'origin', `refs/heads/${ref}`], { cwd: WORK_DIR });
-    const sha = shaRes.stdout.trim().split('\t')[0];
+    // `ls-remote` alone (the first version of this loop) only ever learns
+    // a ref's sha, never transfers the commit *object* — every real run
+    // then failed `git merge <sha>` with "not something we can merge"
+    // (git's error for an unknown object, easy to misread as an ordinary
+    // merge conflict since both hit the same `merge.code !== 0` branch in
+    // `reviewAndMaybeMerge()`), rejecting every genuine edit while only
+    // ever "succeeding" on a branch's still-untouched creation point,
+    // already known locally from bootstrap. `fetch` actually brings the
+    // commit down first.
+    const fetchRes = await git(['fetch', 'origin', ref], { cwd: WORK_DIR });
+    if (fetchRes.code !== 0) continue; // ref briefly missing/racing with creation — try again next round
+    const sha = (await git(['rev-parse', `origin/${ref}`], { cwd: WORK_DIR })).stdout.trim();
     if (!sha || lastReviewedSha.get(ref) === sha) continue;
     lastReviewedSha.set(ref, sha);
     await reviewAndMaybeMerge(ref, sha, n);
