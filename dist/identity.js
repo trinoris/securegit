@@ -279,4 +279,30 @@ export async function generateSigningKeyPair(path) {
     const publicKey = (await readFile(`${path}.pub`, 'utf8')).trim();
     return { publicKey };
 }
+/**
+ * `SHA256:<base64 of SHA-256(key blob), no padding>` — the exact algorithm
+ * `ssh-keygen -lf` and git's own `%GF` (a signing commit's signer
+ * fingerprint) both use, confirmed directly against a real key rather
+ * than assumed from the format's name. Reused to match a commit's
+ * reported signer against a recipient's registered `signingKey`
+ * ([13-verify.md](../specs/securegit/13-verify.md)'s
+ * `commit-signed-by-recipient`, [03-orchestrator.md](../specs/chaotests/03-orchestrator.md)'s
+ * per-branch check) — both compare fingerprints, never raw key lines,
+ * so a trailing comment (`… user@host`) never breaks the match.
+ */
+const BASE64_FIELD = /^[A-Za-z0-9+/]+=*$/;
+export function signingKeyFingerprint(publicKeyLine) {
+    const fields = publicKeyLine.trim().split(/\s+/);
+    // `Buffer.from(x, 'base64')` decodes leniently — it drops characters it
+    // doesn't recognise rather than throwing, so garbage input needs its own
+    // check first, or it would silently hash whatever survived instead of
+    // failing (confirmed directly: `Buffer.from('not-valid-base64!!!',
+    // 'base64')` returns a real, non-empty 12-byte buffer, not an error).
+    if (fields.length < 2 || fields[0].length === 0 || !BASE64_FIELD.test(fields[1])) {
+        throw new IdentityError(`not a valid SSH public key line: '${publicKeyLine}'`);
+    }
+    const blob = Buffer.from(fields[1], 'base64');
+    const digest = createHash('sha256').update(blob).digest();
+    return `SHA256:${digest.toString('base64').replace(/=+$/, '')}`;
+}
 //# sourceMappingURL=identity.js.map

@@ -59,6 +59,17 @@ export interface RecipientFile {
     label: string;
     addedAt: string;
     addedBy: string;
+    /**
+     * An OpenSSH-format public key line for this recipient's *signing* key —
+     * unrelated to `publicKey` above (X25519, for wrapping this file's
+     * `keys`) and to `identityFingerprint`; matched against a commit's
+     * reported signer via `identity.ts`'s `signingKeyFingerprint()`. Optional
+     * and absent, not `null`, for a recipient added before commit signing
+     * existed ([08-multi-recipient.md](../specs/securegit/08-multi-recipient.md),
+     * "Commit signing") — never emitted into the JSON at all when unset, so
+     * an old recipient file re-read by this same type stays byte-identical.
+     */
+    signingKey?: string;
     /** Keyed by generation number as a string ("1", "2", ...). */
     keys: Record<string, WrappedGeneration>;
 }

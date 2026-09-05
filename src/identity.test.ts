@@ -21,6 +21,7 @@ import {
   resolveSigningKeyRef,
   detectLocalSigningKey,
   generateSigningKeyPair,
+  signingKeyFingerprint,
   type IdentityFile,
 } from './identity.js';
 
@@ -338,5 +339,56 @@ describe('generateSigningKeyPair()', () => {
     const path = join(dir, 'id_ed25519');
     await generateSigningKeyPair(path);
     await expect(generateSigningKeyPair(path)).rejects.toThrow(IdentityError);
+  });
+});
+
+describe('signingKeyFingerprint()', () => {
+  let dir: string;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'securegit-identity-fp-'));
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('matches ssh-keygen -lf exactly, for a real generated key', async () => {
+    const path = join(dir, 'id_ed25519');
+    const { publicKey } = await generateSigningKeyPair(path);
+    const { stdout } = await execFile('ssh-keygen', ['-lf', `${path}.pub`]);
+    // "256 SHA256:nds3ev…KA test (ED25519)" — the fingerprint is the second field.
+    const expected = stdout.trim().split(/\s+/)[1];
+    expect(signingKeyFingerprint(publicKey)).toBe(expected);
+  });
+
+  it('is stable for the same key, called twice', async () => {
+    const { publicKey } = await generateSigningKeyPair(join(dir, 'id_ed25519'));
+    expect(signingKeyFingerprint(publicKey)).toBe(signingKeyFingerprint(publicKey));
+  });
+
+  it('differs for different keys', async () => {
+    const a = await generateSigningKeyPair(join(dir, 'a'));
+    const b = await generateSigningKeyPair(join(dir, 'b'));
+    expect(signingKeyFingerprint(a.publicKey)).not.toBe(signingKeyFingerprint(b.publicKey));
+  });
+
+  it('ignores a trailing comment, matching only the key type and blob', async () => {
+    const { publicKey } = await generateSigningKeyPair(join(dir, 'id_ed25519'));
+    const withoutComment = publicKey.split(/\s+/).slice(0, 2).join(' ');
+    const withDifferentComment = `${withoutComment} someone@somewhere`;
+    expect(signingKeyFingerprint(withDifferentComment)).toBe(signingKeyFingerprint(publicKey));
+  });
+
+  it('is prefixed with SHA256:, matching the format git itself reports for a signer', () => {
+    expect(
+      signingKeyFingerprint('ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFiRUiOHgwdBMOAQXey7x3B4WS90jgI0kirS3hCm8xQF'),
+    ).toMatch(/^SHA256:[A-Za-z0-9+/]+$/);
+  });
+
+  it('throws IdentityError on a malformed key line', () => {
+    expect(() => signingKeyFingerprint('not-a-key-line')).toThrow(IdentityError);
+    expect(() => signingKeyFingerprint('')).toThrow(IdentityError);
+    expect(() => signingKeyFingerprint('ssh-ed25519 not-valid-base64!!!')).toThrow(IdentityError);
   });
 });

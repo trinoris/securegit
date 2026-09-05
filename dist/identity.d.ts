@@ -109,4 +109,5 @@ export declare function detectLocalSigningKey(repoDir: string, home: string): Pr
 export declare function generateSigningKeyPair(path: string): Promise<{
     publicKey: string;
 }>;
+export declare function signingKeyFingerprint(publicKeyLine: string): string;
 //# sourceMappingURL=identity.d.ts.map

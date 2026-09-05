@@ -330,6 +330,49 @@ describe('recipientsDir() / recipientPath() / writeRecipientFile() / readRecipie
       await rm(dir, { recursive: true, force: true });
     }
   });
+
+  it('round-trips an optional signingKey (specs/securegit/08-multi-recipient.md, "Commit signing")', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'securegit-recipients-'));
+    try {
+      const file: RecipientFile = {
+        version: 1,
+        fingerprint: 'abc',
+        publicKey: 'SGPUB1x',
+        label: 'laptop',
+        addedAt: new Date().toISOString(),
+        addedBy: 'def',
+        signingKey: 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFiRUiOHgwdBMOAQXey7x3B4WS90jgI0kirS3hCm8xQF laptop',
+        keys: {},
+      };
+      const path = recipientPath(dir, 'abc');
+      await writeRecipientFile(path, file);
+      expect(await readRecipientFile(path)).toEqual(file);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a recipient added before signing existed has no signingKey field at all — not null, absent', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'securegit-recipients-'));
+    try {
+      const file: RecipientFile = {
+        version: 1,
+        fingerprint: 'abc',
+        publicKey: 'SGPUB1x',
+        label: 'laptop',
+        addedAt: new Date().toISOString(),
+        addedBy: 'def',
+        keys: {},
+      };
+      const path = recipientPath(dir, 'abc');
+      await writeRecipientFile(path, file);
+      const raw = await readFile(path, 'utf8');
+      expect(raw).not.toContain('signingKey');
+      expect((await readRecipientFile(path)).signingKey).toBeUndefined();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('removedRecipientsLogPath() / appendRemovedRecipientLogEntry() / readRemovedRecipientsLog()', () => {
