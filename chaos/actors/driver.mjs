@@ -566,6 +566,21 @@ async function orchestratorReviewRound(n) {
  *     read as a false "success"
  */
 async function finalIntegritySelfCheck() {
+  // A full fetch of *every* branch, not just BRANCH — confirmed necessary
+  // by two real runs (33955584166, 33955942857): under working-branch/
+  // pr-gated, a collaborator's very last push (to its own feature/working
+  // ref) can land after the orchestrator's last review round of the run,
+  // which is otherwise the only thing keeping those branches' remote-
+  // tracking refs current here. Without this, `git log --all` below
+  // simply never sees that commit — not because anything was lost, but
+  // because this operator clone never fetched the branch it was on again
+  // — and it shows up as a false "missing commit", a race in this test
+  // harness's own end-of-run timing, not a real data-loss finding. A
+  // no-op refspec for direct-master (nothing else exists to fetch beyond
+  // BRANCH), so safe unconditionally. `git fetch origin` with no
+  // ref argument uses the clone's default refspec
+  // (`+refs/heads/*:refs/remotes/origin/*`) — every branch, not one.
+  await git(['fetch', 'origin'], { cwd: WORK_DIR, env: gitEnv() });
   await pullOnce();
 
   const reportPath = process.env.REPORT_PATH ?? '/report/report.jsonl';
