@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, rm, stat } from 'node:fs/promises';
+import { execFile as execFileCb } from 'node:child_process';
+import { promisify } from 'node:util';
+import { mkdtemp, rm, stat, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassphraseFileProvider } from './provider.js';
@@ -16,8 +18,13 @@ import {
   identityPath,
   writeIdentityFile,
   readIdentityFile,
+  resolveSigningKeyRef,
+  detectLocalSigningKey,
+  generateSigningKeyPair,
   type IdentityFile,
 } from './identity.js';
+
+const execFile = promisify(execFileCb);
 
 const FAST_COST = { N: 2 ** 10, r: 8, p: 1 };
 const PASSPHRASE = 'correct horse battery staple';
@@ -210,5 +217,126 @@ describe('identityPath() / writeIdentityFile() / readIdentityFile()', () => {
 
   it('reading a missing file throws', async () => {
     await expect(readIdentityFile(identityPath(dir))).rejects.toThrow();
+  });
+});
+
+describe('resolveSigningKeyRef()', () => {
+  const home = '/home/whoever';
+
+  it('null in, null out — nothing configured', async () => {
+    await expect(resolveSigningKeyRef(null, home)).resolves.toBeNull();
+  });
+
+  it('empty string resolves to null, same as unconfigured', async () => {
+    await expect(resolveSigningKeyRef('', home)).resolves.toBeNull();
+  });
+
+  it('the inline key:: form is returned verbatim, trimmed, no filesystem access', async () => {
+    const readFileImpl = async () => {
+      throw new Error('should never be called for an inline key');
+    };
+    await expect(
+      resolveSigningKeyRef('key::ssh-ed25519 AAAAtest ', home, readFileImpl),
+    ).resolves.toBe('ssh-ed25519 AAAAtest');
+  });
+
+  it('a ~/-relative path is expanded against home before reading', async () => {
+    const seen: string[] = [];
+    const readFileImpl = async (p: string) => {
+      seen.push(p);
+      return 'ssh-ed25519 AAAAhome\n';
+    };
+    const result = await resolveSigningKeyRef('~/.ssh/id_ed25519.pub', home, readFileImpl);
+    expect(seen).toEqual([join(home, '.ssh', 'id_ed25519.pub')]);
+    expect(result).toBe('ssh-ed25519 AAAAhome');
+  });
+
+  it('a plain absolute path is read as-is', async () => {
+    const seen: string[] = [];
+    const readFileImpl = async (p: string) => {
+      seen.push(p);
+      return 'ssh-ed25519 AAAAabs\n';
+    };
+    await resolveSigningKeyRef('/etc/keys/signing.pub', home, readFileImpl);
+    expect(seen).toEqual(['/etc/keys/signing.pub']);
+  });
+
+  it('a configured path that cannot be read resolves to null, not a throw', async () => {
+    const readFileImpl = async () => {
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    };
+    await expect(resolveSigningKeyRef('~/.ssh/gone.pub', home, readFileImpl)).resolves.toBeNull();
+  });
+});
+
+describe('detectLocalSigningKey()', () => {
+  let repoDir: string;
+  let home: string;
+
+  beforeEach(async () => {
+    repoDir = await mkdtemp(join(tmpdir(), 'securegit-identity-repo-'));
+    home = await mkdtemp(join(tmpdir(), 'securegit-identity-home-'));
+    await execFile('git', ['init', '-q', repoDir]);
+  });
+
+  afterEach(async () => {
+    await rm(repoDir, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  });
+
+  it('returns null when user.signingkey is not configured', async () => {
+    await expect(detectLocalSigningKey(repoDir, home)).resolves.toBeNull();
+  });
+
+  it('reads a real, locally-configured signing key path, isolated to this repo only', async () => {
+    const { publicKey } = await generateSigningKeyPair(join(home, 'id_ed25519'));
+    await execFile('git', ['config', 'user.signingkey', join(home, 'id_ed25519.pub')], { cwd: repoDir });
+    await expect(detectLocalSigningKey(repoDir, home)).resolves.toBe(publicKey);
+  });
+
+  it('reads the inline key:: form too', async () => {
+    await execFile('git', ['config', 'user.signingkey', 'key::ssh-ed25519 AAAAinline'], { cwd: repoDir });
+    await expect(detectLocalSigningKey(repoDir, home)).resolves.toBe('ssh-ed25519 AAAAinline');
+  });
+});
+
+describe('generateSigningKeyPair()', () => {
+  let dir: string;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'securegit-identity-signing-'));
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('generates a real Ed25519 SSH-format keypair', async () => {
+    const path = join(dir, 'id_ed25519');
+    const { publicKey } = await generateSigningKeyPair(path);
+    expect(publicKey).toMatch(/^ssh-ed25519 /);
+    const onDisk = (await readFile(`${path}.pub`, 'utf8')).trim();
+    expect(onDisk).toBe(publicKey);
+    // The private half exists and is a real OpenSSH private key, not a stub.
+    const privateKey = await readFile(path, 'utf8');
+    expect(privateKey).toContain('BEGIN OPENSSH PRIVATE KEY');
+  });
+
+  it('two calls produce different keypairs', async () => {
+    const a = await generateSigningKeyPair(join(dir, 'a'));
+    const b = await generateSigningKeyPair(join(dir, 'b'));
+    expect(a.publicKey).not.toBe(b.publicKey);
+  });
+
+  it('creates missing parent directories', async () => {
+    const path = join(dir, 'nested', 'deeper', 'id_ed25519');
+    const { publicKey } = await generateSigningKeyPair(path);
+    expect(publicKey).toMatch(/^ssh-ed25519 /);
+  });
+
+  it('refuses to overwrite an existing key at the same path', async () => {
+    const path = join(dir, 'id_ed25519');
+    await generateSigningKeyPair(path);
+    await expect(generateSigningKeyPair(path)).rejects.toThrow(IdentityError);
   });
 });

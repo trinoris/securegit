@@ -5,8 +5,11 @@
 // that protects a repository's own master key.
 // See specs/securegit/08-multi-recipient.md.
 import { generateKeyPairSync, createHash, createPrivateKey, createPublicKey, diffieHellman, randomBytes, } from 'node:crypto';
+import { execFile as execFileCb, spawn } from 'node:child_process';
+import { promisify } from 'node:util';
 import { mkdir, readFile, rename, writeFile, unlink } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
+const execFile = promisify(execFileCb);
 export class IdentityError extends Error {
     code = 'IDENTITY';
     constructor(message) {
@@ -175,5 +178,105 @@ export async function writeIdentityFile(path, file) {
 export async function readIdentityFile(path) {
     const raw = await readFile(path, 'utf8');
     return JSON.parse(raw);
+}
+// ---------------------------------------------------------------------------
+// Commit signing key — detection and generation.
+// specs/securegit/08-multi-recipient.md, "Commit signing".
+// ---------------------------------------------------------------------------
+async function gitConfigGet(repoDir, key) {
+    try {
+        const { stdout } = await execFile('git', ['config', '--get', key], { cwd: repoDir });
+        return stdout.replace(/\n$/, '');
+    }
+    catch (e) {
+        const err = e;
+        if (err.code === 1)
+            return null; // unset
+        throw new IdentityError(`could not read git config in ${repoDir}: ${e.message}`);
+    }
+}
+/**
+ * Resolves a raw `user.signingkey` config value to the actual public key
+ * line, without touching the filesystem or git itself — split out from
+ * `detectLocalSigningKey()` below purely so the three shapes git accepts
+ * (inline `key::…`, `~`-relative path, plain path) are each testable
+ * directly, no real git repo or `$HOME` needed.
+ *
+ * `null` in, `null` out: no key configured, nothing to resolve.
+ * A configured-but-unreadable path also resolves to `null`, not a throw —
+ * `identity init` treats "found a reference but couldn't read it" the same
+ * as "found nothing": either way, there is no key to record yet, and the
+ * reason (a stale config entry, a moved file) belongs in a warning the
+ * caller prints, not an exception this pure function raises.
+ */
+export async function resolveSigningKeyRef(value, home, readFileImpl = (p) => readFile(p, 'utf8')) {
+    if (value === null || value.length === 0)
+        return null;
+    if (value.startsWith('key::'))
+        return value.slice('key::'.length).trim();
+    const path = value.startsWith('~/') ? join(home, value.slice(2)) : value;
+    try {
+        return (await readFileImpl(path)).trim();
+    }
+    catch {
+        return null;
+    }
+}
+/**
+ * Whatever `git commit -S` would already sign with in `repoDir`, right
+ * now — reads the *effective* `user.signingkey` (local overrides global
+ * overrides system, same as git's own resolution), resolved to the actual
+ * public key content via `resolveSigningKeyRef()`. Read-only: this never
+ * writes anything, generates anything, or prompts — see `identity init`'s
+ * own contract for why detecting an existing key is unconditional but
+ * recording/generating one is not.
+ */
+export async function detectLocalSigningKey(repoDir, home) {
+    const value = await gitConfigGet(repoDir, 'user.signingkey');
+    return resolveSigningKeyRef(value, home);
+}
+/**
+ * Generates a fresh Ed25519 SSH-format signing keypair at `path` (and
+ * `path.pub`) via the real `ssh-keygen` binary — deliberately not
+ * hand-rolled: the OpenSSH private-key file format is a specific,
+ * non-trivial on-disk encoding, and generating a *signing* key by
+ * reimplementing that format is exactly the kind of unforced complexity
+ * this package avoids elsewhere too. No passphrase (`-N ''`) — this key
+ * signs commits, it never wraps an RMK, so it doesn't carry the same
+ * stakes as the identity/keyring material a `KeyProvider` protects
+ * elsewhere in this codebase.  Refuses (does not overwrite) if a key
+ * already exists at `path` — `identity init --generate-signing-key`'s own
+ * contract is "only when none is already recorded", enforced by the
+ * caller checking `identity.json` first, and `ssh-keygen` itself refusing
+ * an existing file first is a second, independent backstop against ever
+ * clobbering one by accident.
+ *
+ * Runs via `spawn`, not `execFile` — `execFile` always leaves the child's
+ * stdin as an open, never-closed pipe, and `ssh-keygen` asking "Overwrite
+ * (y/n)?" on an existing path then blocks on that pipe forever instead of
+ * failing (confirmed directly: `execFile` hangs past any reasonable
+ * timeout here, `spawn` with stdin explicitly `'ignore'` — mapped to
+ * `/dev/null`, real EOF — exits 1 immediately). The "refuses to overwrite"
+ * guarantee above depends on this, not just on ssh-keygen's own default
+ * behaviour.
+ */
+export async function generateSigningKeyPair(path) {
+    await mkdir(dirname(path), { recursive: true });
+    await new Promise((resolve, reject) => {
+        const child = spawn('ssh-keygen', ['-t', 'ed25519', '-f', path, '-N', '', '-C', 'securegit'], {
+            stdio: ['ignore', 'pipe', 'pipe'],
+        });
+        let stderr = '';
+        child.stderr.on('data', (d) => (stderr += d.toString('utf8')));
+        child.on('error', (e) => reject(new IdentityError(`could not run ssh-keygen: ${e.message}`)));
+        child.on('exit', (code) => {
+            if (code === 0)
+                resolve();
+            else
+                reject(new IdentityError(`could not generate a signing key at ${path}: ${stderr.trim() || `ssh-keygen exited ${code}`}`));
+        });
+    });
+    const publicKey = (await readFile(`${path}.pub`, 'utf8')).trim();
+    return { publicKey };
 }
 //# sourceMappingURL=identity.js.map
