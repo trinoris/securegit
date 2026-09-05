@@ -3,9 +3,10 @@
 //                   file on a loop, same as collaborator-b
 //   collaborator-b  waits for collaborator-a's bootstrap, then the same loop
 //   operator        never edits secrets/ files — runs unlock/status/verify/
-//                   rotate, plus reconciling .gitattributes back to the
-//                   protected pattern list every round (T1 recovery — see
-//                   reconcileAttributes())
+//                   rotate, plus reconciling attribute protection and
+//                   re-encrypting stale generations every round (T1
+//                   recovery and post-rotate cleanup — see
+//                   reconcileProtection())
 // See specs/chaotests/01-sandbox.md.
 //
 // v1 scope: each collaborator edits only its own file (secrets/<role>.json)
@@ -31,7 +32,7 @@ const BRANCH = process.env.BRANCH ?? 'main';
 const DURATION_SECONDS = Number(process.env.CHAOS_DURATION_SECONDS ?? 300);
 const HOME = process.env.HOME;
 // What `bootstrapAsCollaboratorA` protects at seed time, and what the
-// operator's `reconcileAttributes` keeps re-asserting every round — see
+// operator's `reconcileProtection` keeps re-asserting every round — see
 // there for why one list serves both purposes.
 const PROTECTED_PATTERNS = ['secrets/**'];
 const GITATTRIBUTES_PATH = join(WORK_DIR, '.gitattributes');
@@ -217,8 +218,8 @@ async function collaboratorRound(n) {
  * 16-adversarial-integrity.md's T1 section documents as *not* shipped in
  * the product itself (no `install --hooks`, no server-side `pre-receive`)
  * — built here as the always-on ops process a real deployment would run
- * alongside it, using only the existing `protect` primitive, not as a new
- * CLI feature.
+ * alongside it, using only the existing `protect`/`reencrypt` primitives,
+ * not as a new CLI feature.
  *
  * Doesn't retroactively fix history: a blob some collaborator already
  * committed unprotected during the window between the downgrade landing
@@ -227,40 +228,53 @@ async function collaboratorRound(n) {
  * must never take on its own) — this only bounds how long the *next*
  * write stays exposed for.
  *
- * **Found by a real run (33952769755), not anticipated up front:**
- * restoring the attribute alone wedges every future round. The instant
- * `secrets/**`'s `filter=securegit` line comes back, git starts running
- * `clean` again over `secrets/collaborator-a.json`'s *working-tree*
- * content (still plaintext — that plaintext is exactly what the downgrade
- * let land) to compare against the index — and the index still holds that
- * *same* plaintext (that's what got committed while unprotected), so
- * `clean`'s freshly-produced ciphertext no longer matches it. Git now
- * considers the path locally modified, and refuses every subsequent
- * `pullOnce()` merge that touches it ("Your local changes... would be
- * overwritten by merge") — forever, since nothing here ever commits a fix
- * for that mismatch on its own. `reencrypt` is exactly the existing
- * primitive for this: re-run `clean` over every protected path's
- * working-tree plaintext and stage the ciphertext result, matching the
- * index to what git now expects. Staged via `update-index` plumbing, so
- * it needs no separate `git add` — the same `git commit` below picks up
- * both this and `.gitattributes` together.
+ * **`reencrypt` runs every round, unconditionally — found the hard way,
+ * twice, by real runs.** Restoring the attribute alone (run 33952769755)
+ * wedges every future round: the instant `secrets/**`'s `filter=securegit`
+ * line comes back, git runs `clean` again over the affected path's
+ * *working-tree* content (still plaintext — that's exactly what the
+ * downgrade let land) to compare against the index, which still holds
+ * that *same* plaintext, so `clean`'s freshly-produced ciphertext no
+ * longer matches it — git calls the path locally modified and refuses
+ * every subsequent `pullOnce()` merge touching it, forever, since nothing
+ * commits a fix on its own. Running `reencrypt` in the *same* branch as
+ * the attribute fix (an earlier version of this function) resolved that
+ * case but missed a second, independent trigger for the identical
+ * symptom (run 33953375232): `operatorRound`'s own periodic `key rotate`
+ * bumps the current generation, and 09-rotation-recovery.md's own
+ * documented behavior — "files not touched again stay on their old
+ * [generation] indefinitely, which is correct" — means every protected
+ * path nobody has recommitted since is now on an *older* generation than
+ * `clean` will produce for it, the exact same mismatch, with no
+ * `.gitattributes` change involved at all to trigger the old
+ * attribute-only-gated call. Calling `reencrypt` every round regardless
+ * (idempotent — a no-op once nothing is stale) closes both triggers with
+ * the one primitive, rather than chasing a third.
  */
-async function reconcileAttributes(n) {
+async function reconcileProtection(n) {
   const before = await readFile(GITATTRIBUTES_PATH, 'utf8').catch(() => '');
   await securegit(['protect', ...PROTECTED_PATTERNS], { cwd: WORK_DIR });
   const after = await readFile(GITATTRIBUTES_PATH, 'utf8').catch(() => '');
-  if (after === before) return; // already matched — the ordinary case, not worth logging every round
-
   const reencrypt = await securegit(['reencrypt'], { cwd: WORK_DIR });
+  // Logged every round, pass or fail, independently of whether anything
+  // below ends up committed — a `reencrypt` that silently starts erroring
+  // (e.g. on some future attack shape this doesn't anticipate) would
+  // otherwise be invisible whenever nothing else gave this round a reason
+  // to commit, the same blind spot `pullOnce()`'s own result had before
+  // this file started recording it unconditionally too.
+  if (reencrypt.code !== 0) {
+    await record('observation', `reencrypt reported an error (round ${n})`, {
+      code: reencrypt.code,
+      stderr: reencrypt.stderr.trim(),
+    });
+  }
+
   await git(['add', '.gitattributes'], { cwd: WORK_DIR, env: gitEnv() });
   const commit = await git(
-    ['commit', '-m', 'operator: restore securegit attribute protection'],
+    ['commit', '-m', 'operator: reconcile attribute protection / re-encrypt stale generations'],
     { cwd: WORK_DIR, env: gitEnv() },
   );
-  if (commit.code !== 0) {
-    await record('observation', `attribute reconcile: nothing to commit (round ${n})`, commit);
-    return;
-  }
+  if (commit.code !== 0) return; // nothing needed fixing this round — the ordinary case, not worth logging
 
   let push = await git(['push', 'origin', BRANCH], { cwd: WORK_DIR, env: gitEnv() });
   if (push.code !== 0) {
@@ -271,7 +285,7 @@ async function reconcileAttributes(n) {
       push = await git(['push', 'origin', BRANCH], { cwd: WORK_DIR, env: gitEnv() });
     }
   }
-  await record('action', `restored .gitattributes protection (round ${n})`, {
+  await record('action', `reconciled attribute protection / re-encrypted stale generations (round ${n})`, {
     before,
     after,
     reencrypt: { code: reencrypt.code, stderr: reencrypt.stderr.trim() },
@@ -284,7 +298,7 @@ async function operatorRound(n) {
   const pull = await pullOnce();
   // Unlike `collaboratorRound` (which treats a failed pull as an ordinary
   // push race and retries around its own push), this is worth recording
-  // every round, pass or fail: `reconcileAttributes()` below can only ever
+  // every round, pass or fail: `reconcileProtection()` below can only ever
   // see what this pull actually brought in, so a merge that silently keeps
   // failing round after round would silently stop the T1 recovery loop
   // too, with nothing else in this round's own logic able to tell. `head`
@@ -303,7 +317,7 @@ async function operatorRound(n) {
     });
   }
 
-  await reconcileAttributes(n);
+  await reconcileProtection(n);
 
   const status = await securegit(['status', '--json'], { cwd: WORK_DIR });
   await record('observation', `status (round ${n})`, { code: status.code, stdout: status.stdout.trim() });

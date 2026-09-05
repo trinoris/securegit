@@ -114,33 +114,51 @@ it mandatory.
 The chaos sandbox's `operator` role (`chaos/actors/driver.mjs`,
 [chaotests/01-sandbox.md](../chaotests/01-sandbox.md)) now re-runs `protect`
 against the full protected-pattern list every round, immediately followed
-by `reencrypt` — `reconcileAttributes()`, built entirely from these two
-existing primitives (both idempotent: a no-op pair when `.gitattributes`
-already matches and nothing protected is currently sitting as plaintext),
+by `reencrypt` — `reconcileProtection()`, built entirely from these two
+existing primitives (both idempotent: a no-op pair once nothing is stale),
 committing and pushing the fix the round after chaos-5's downgrade lands.
 This is not a new CLI feature and not "the detector made mandatory" from
 above — it's the same trust model as the honest collaborators the
 "client-side hooks" note above already describes, just automated and
 continuously running instead of a human remembering to check.
 
-**`reencrypt` is not optional here — found the hard way, by a real run.**
-The first version of this recovery restored `.gitattributes` alone. Real
-run 33952769755 showed that wedges the operator permanently: the moment
-the attribute comes back, git starts running `clean` again over the
-affected path's *working-tree* content (still plaintext — that's exactly
-what the downgrade let land) to compare against the index — and the index
-holds that *same* plaintext, since that's what got committed while
-unprotected. `clean`'s freshly-produced ciphertext no longer matches the
-index, git now considers the path locally modified, and every subsequent
-`pull` touching it fails with "local changes would be overwritten by
-merge" — forever, since nothing ever commits a fix for that specific
-mismatch on its own. Confirmed both ways with a local, no-Docker repro
-(plain `git` + the built CLI, same shape as [15](15-failure-modes.md)'s F16
-investigation): restoring the attribute alone reproduces the wedge
-immediately on the next pull; adding `reencrypt` before the commit — which
-re-runs `clean` over the working tree and stages the result, matching the
-index to what git now expects — resolves it, confirmed by a clean
-fast-forward merge afterward. Concretely, the fix as built means:
+**`reencrypt` is not optional here, and not only for the downgrade case
+itself — found the hard way, twice, by real runs.** The first version of
+this recovery restored `.gitattributes` alone. Real run 33952769755 showed
+that wedges the operator permanently: the moment the attribute comes back,
+git starts running `clean` again over the affected path's *working-tree*
+content (still plaintext — that's exactly what the downgrade let land) to
+compare against the index — and the index holds that *same* plaintext,
+since that's what got committed while unprotected. `clean`'s freshly-
+produced ciphertext no longer matches the index, git now considers the
+path locally modified, and every subsequent `pull` touching it fails with
+"local changes would be overwritten by merge" — forever, since nothing
+ever commits a fix for that specific mismatch on its own. Confirmed both
+ways with a local, no-Docker repro (plain `git` + the built CLI, same
+shape as [15](15-failure-modes.md)'s F16 investigation): restoring the
+attribute alone reproduces the wedge immediately on the next pull; adding
+`reencrypt` before the commit — which re-runs `clean` over the working
+tree and stages the result, matching the index to what git now expects —
+resolves it, confirmed by a clean fast-forward merge afterward.
+
+That fix still only ran `reencrypt` inside the "`.gitattributes` actually
+changed" branch — real run 33953375232 then showed the identical symptom
+("local changes would be overwritten by merge") recurring for 14 straight
+rounds against `secrets/relocated-*.json` paths (chaos-5's T3 relocation,
+reusing an existing ciphertext blob verbatim at a new path) with no
+further attribute change involved at all to ever re-trigger that branch.
+A minimal isolated repro (a plain `key rotate` with no attack, no
+relocation) did *not* reproduce a stale-generation mismatch on its own —
+so the precise mechanism for this second trigger is left as "some
+combination of relocation/rollback and an intervening rotation," not
+pinned down to one isolated cause the way the first one was. The fix
+applied is broader than chasing that mechanism down further: run
+`reencrypt` **every round, unconditionally**, gated on nothing — it is
+idempotent by construction (09-rotation-recovery.md: "a file already on
+the current generation re-encrypts to byte-identical ciphertext"), so an
+unconditional call costs nothing extra when there's nothing stale, and
+catches whatever *does* produce staleness without needing to enumerate
+every way that can happen. Concretely, the fix as built means:
 
 - It shrinks the exposure window from "for the rest of the run, forever"
   (the original, undetected-locally chaos-sandbox finding) to "until the
